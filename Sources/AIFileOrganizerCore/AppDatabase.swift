@@ -1,0 +1,352 @@
+import Foundation
+import GRDB
+
+public final class AppDatabase: @unchecked Sendable {
+  public let queue: DatabaseQueue
+  private let encoder: JSONEncoder
+  private let decoder: JSONDecoder
+
+  public init(path: String) throws {
+    var configuration = Configuration()
+    configuration.prepareDatabase { db in
+      try db.execute(sql: "PRAGMA foreign_keys = ON")
+      try db.execute(sql: "PRAGMA busy_timeout = 5000")
+    }
+    queue = try DatabaseQueue(path: path, configuration: configuration)
+    encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    try migrate()
+  }
+
+  public static func applicationDatabase() throws -> AppDatabase {
+    let fileManager = FileManager.default
+    let base = try fileManager.url(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask,
+      appropriateFor: nil,
+      create: true
+    ).appendingPathComponent("AIFileOrganizerV2", isDirectory: true)
+    try fileManager.createDirectory(at: base, withIntermediateDirectories: true)
+    return try AppDatabase(path: base.appendingPathComponent("organizer.sqlite").path)
+  }
+
+  public static func inMemory() throws -> AppDatabase {
+    var configuration = Configuration()
+    configuration.prepareDatabase { db in try db.execute(sql: "PRAGMA foreign_keys = ON") }
+    let instance = try AppDatabase(queue: DatabaseQueue(configuration: configuration))
+    return instance
+  }
+
+  private init(queue: DatabaseQueue) throws {
+    self.queue = queue
+    encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    try migrate()
+  }
+
+  private func migrate() throws {
+    var migrator = DatabaseMigrator()
+    migrator.registerMigration("v1-native") { db in
+      try db.create(table: "workspaces") { table in
+        table.column("id", .text).primaryKey()
+        table.column("inbox_path", .text).notNull()
+        table.column("library_path", .text).notNull()
+        table.column("inbox_bookmark", .blob).notNull()
+        table.column("library_bookmark", .blob).notNull()
+        table.column("inbox_volume_id", .text).notNull()
+        table.column("library_volume_id", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.column("created_at", .datetime).notNull()
+      }
+      try db.create(table: "sessions") { table in
+        table.column("id", .text).primaryKey()
+        table.column("workspace_id", .text).notNull().indexed()
+          .references("workspaces", onDelete: .cascade)
+        table.column("state", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.column("started_at", .datetime).notNull()
+        table.column("finished_at", .datetime)
+      }
+      try db.create(table: "item_snapshots") { table in
+        table.column("id", .text).primaryKey()
+        table.column("session_id", .text).notNull().indexed()
+          .references("sessions", onDelete: .cascade)
+        table.column("path", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+      }
+      try db.create(table: "proposals") { table in
+        table.column("id", .text).primaryKey()
+        table.column("session_id", .text).notNull().indexed()
+          .references("sessions", onDelete: .cascade)
+        table.column("item_id", .text).notNull().indexed()
+          .references("item_snapshots", onDelete: .cascade)
+        table.column("status", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+      }
+      try db.create(table: "folder_proposals") { table in
+        table.column("id", .text).primaryKey()
+        table.column("session_id", .text).notNull().indexed()
+          .references("sessions", onDelete: .cascade)
+        table.column("normalized_name", .text).notNull()
+        table.column("status", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.uniqueKey(["session_id", "normalized_name"])
+      }
+      try db.create(table: "plans") { table in
+        table.column("id", .text).primaryKey()
+        table.column("session_id", .text).notNull().indexed()
+          .references("sessions", onDelete: .cascade)
+        table.column("status", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.column("receipt_json", .blob)
+        table.column("confirmed_at", .datetime).notNull()
+      }
+      try db.create(table: "operations") { table in
+        table.column("id", .text).primaryKey()
+        table.column("plan_id", .text).notNull().indexed()
+          .references("plans", onDelete: .cascade)
+        table.column("sequence", .integer).notNull()
+        table.column("kind", .text).notNull()
+        table.column("source_path", .text)
+        table.column("destination_path", .text).notNull()
+        table.column("state", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.column("error", .text)
+        table.column("updated_at", .datetime).notNull()
+        table.uniqueKey(["plan_id", "sequence"])
+      }
+      try db.create(table: "decision_records") { table in
+        table.column("id", .text).primaryKey()
+        table.column("session_id", .text).notNull().indexed()
+          .references("sessions", onDelete: .cascade)
+        table.column("item_id", .text).notNull()
+        table.column("action", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.column("created_at", .datetime).notNull()
+      }
+    }
+    try migrator.migrate(queue)
+  }
+
+  private func encode<T: Encodable>(_ value: T) throws -> Data {
+    do { return try encoder.encode(value) } catch {
+      throw OrganizerError.persistenceFailed("编码数据失败：\(error.localizedDescription)")
+    }
+  }
+
+  private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+    do { return try decoder.decode(type, from: data) } catch {
+      throw OrganizerError.persistenceFailed("读取数据失败：\(error.localizedDescription)")
+    }
+  }
+
+  public func saveWorkspace(_ workspace: Workspace) throws {
+    let payload = try encode(workspace)
+    try queue.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO workspaces
+          (id, inbox_path, library_path, inbox_bookmark, library_bookmark,
+           inbox_volume_id, library_volume_id, payload_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+          inbox_path = excluded.inbox_path, library_path = excluded.library_path,
+          inbox_bookmark = excluded.inbox_bookmark, library_bookmark = excluded.library_bookmark,
+          inbox_volume_id = excluded.inbox_volume_id,
+          library_volume_id = excluded.library_volume_id, payload_json = excluded.payload_json
+          """,
+        arguments: [
+          workspace.id.uuidString, workspace.inboxPath, workspace.libraryPath,
+          workspace.inboxBookmark, workspace.libraryBookmark, workspace.inboxVolumeID,
+          workspace.libraryVolumeID, payload, workspace.createdAt,
+        ]
+      )
+    }
+  }
+
+  public func latestWorkspace() throws -> Workspace? {
+    try queue.read { db in
+      guard
+        let data: Data = try Data.fetchOne(
+          db, sql: "SELECT payload_json FROM workspaces ORDER BY created_at DESC LIMIT 1"
+        )
+      else { return nil }
+      return try decode(Workspace.self, from: data)
+    }
+  }
+
+  public func clearWorkspaces() throws {
+    try queue.write { db in
+      try db.execute(sql: "DELETE FROM workspaces")
+    }
+  }
+
+  public func saveSession(_ session: OrganizationSession) throws {
+    let payload = try encode(session)
+    try queue.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO sessions (id, workspace_id, state, payload_json, started_at, finished_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET state = excluded.state,
+          payload_json = excluded.payload_json, finished_at = excluded.finished_at
+          """,
+        arguments: [
+          session.id.uuidString, session.workspaceID.uuidString,
+          session.state.rawValue, payload, session.startedAt, session.finishedAt,
+        ]
+      )
+    }
+  }
+
+  public func saveSnapshots(_ snapshots: [ItemSnapshot]) throws {
+    let rows = try snapshots.map { ($0, try encode($0)) }
+    try queue.write { db in
+      for (item, payload) in rows {
+        try db.execute(
+          sql:
+            "INSERT OR REPLACE INTO item_snapshots (id, session_id, path, payload_json) VALUES (?, ?, ?, ?)",
+          arguments: [item.id.uuidString, item.sessionID.uuidString, item.path, payload]
+        )
+      }
+    }
+  }
+
+  public func saveProposals(_ proposals: [ClassificationProposal]) throws {
+    let rows = try proposals.map { ($0, try encode($0)) }
+    try queue.write { db in
+      for (proposal, payload) in rows {
+        try db.execute(
+          sql:
+            "INSERT OR REPLACE INTO proposals (id, session_id, item_id, status, payload_json) VALUES (?, ?, ?, ?, ?)",
+          arguments: [
+            proposal.id.uuidString, proposal.sessionID.uuidString,
+            proposal.itemID.uuidString, proposal.status.rawValue, payload,
+          ]
+        )
+      }
+    }
+  }
+
+  public func saveFolderProposals(_ proposals: [FolderProposal]) throws {
+    let rows = try proposals.map { ($0, try encode($0)) }
+    try queue.write { db in
+      for (proposal, payload) in rows {
+        try db.execute(
+          sql: """
+            INSERT INTO folder_proposals (id, session_id, normalized_name, status, payload_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, normalized_name) DO UPDATE SET
+            status = excluded.status, payload_json = excluded.payload_json
+            """,
+          arguments: [
+            proposal.id.uuidString, proposal.sessionID.uuidString,
+            proposal.normalizedName, proposal.status.rawValue, payload,
+          ]
+        )
+      }
+    }
+  }
+
+  public func savePlan(_ plan: OrganizationPlan) throws {
+    let planPayload = try encode(plan)
+    let operations = try plan.operations.map { ($0, try encode($0)) }
+    try queue.write { db in
+      try db.execute(
+        sql:
+          "INSERT OR IGNORE INTO plans (id, session_id, status, payload_json, confirmed_at) VALUES (?, ?, 'confirmed', ?, ?)",
+        arguments: [plan.id.uuidString, plan.sessionID.uuidString, planPayload, plan.confirmedAt]
+      )
+      for (operation, payload) in operations {
+        try db.execute(
+          sql: """
+            INSERT OR IGNORE INTO operations
+            (id, plan_id, sequence, kind, source_path, destination_path, state, payload_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+          arguments: [
+            operation.id.uuidString, plan.id.uuidString, operation.sequence,
+            operation.kind.rawValue, operation.sourcePath, operation.destinationPath,
+            OperationState.pending.rawValue, payload, Date(),
+          ]
+        )
+      }
+    }
+  }
+
+  public func updateOperation(_ id: UUID, state: OperationState, error: String? = nil) throws {
+    try queue.write { db in
+      try db.execute(
+        sql: "UPDATE operations SET state = ?, error = ?, updated_at = ? WHERE id = ?",
+        arguments: [state.rawValue, error, Date(), id.uuidString]
+      )
+    }
+  }
+
+  public func operationStates(planID: UUID) throws -> [UUID: OperationState] {
+    try queue.read { db in
+      let rows = try Row.fetchAll(
+        db, sql: "SELECT id, state FROM operations WHERE plan_id = ?",
+        arguments: [planID.uuidString])
+      return Dictionary(
+        uniqueKeysWithValues: rows.compactMap { row in
+          guard let id = UUID(uuidString: row["id"]),
+            let state = OperationState(rawValue: row["state"])
+          else { return nil }
+          return (id, state)
+        })
+    }
+  }
+
+  public func saveReceipt(_ receipt: ExecutionReceipt) throws {
+    let payload = try encode(receipt)
+    try queue.write { db in
+      try db.execute(
+        sql: "UPDATE plans SET status = ?, receipt_json = ? WHERE id = ?",
+        arguments: [
+          receipt.results.contains(where: { $0.state == .failed || $0.state == .blocked })
+            ? "partial" : "completed",
+          payload, receipt.planID.uuidString,
+        ]
+      )
+    }
+  }
+
+  public func receipt(planID: UUID) throws -> ExecutionReceipt? {
+    try queue.read { db in
+      guard
+        let data: Data = try Data.fetchOne(
+          db, sql: "SELECT receipt_json FROM plans WHERE id = ?", arguments: [planID.uuidString]
+        )
+      else { return nil }
+      return try decode(ExecutionReceipt.self, from: data)
+    }
+  }
+
+  public func saveDecision(_ record: DecisionRecord) throws {
+    let payload = try encode(record)
+    try queue.write { db in
+      try db.execute(
+        sql:
+          "INSERT INTO decision_records (id, session_id, item_id, action, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        arguments: [
+          record.id.uuidString, record.sessionID.uuidString,
+          record.itemID.uuidString, record.action, payload, record.createdAt,
+        ]
+      )
+    }
+  }
+
+  public func rowCount(_ table: String) throws -> Int {
+    let allowed = [
+      "workspaces", "sessions", "item_snapshots", "proposals", "folder_proposals", "plans",
+      "operations", "decision_records",
+    ]
+    guard allowed.contains(table) else { throw OrganizerError.persistenceFailed("未知数据表") }
+    return try queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)") ?? 0 }
+  }
+}

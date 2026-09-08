@@ -1,0 +1,230 @@
+import Foundation
+
+public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
+  private let workspace: Workspace
+  private let database: AppDatabase
+  private let fileManager: FileManager
+
+  public init(workspace: Workspace, database: AppDatabase, fileManager: FileManager = .default) {
+    self.workspace = workspace
+    self.database = database
+    self.fileManager = fileManager
+  }
+
+  public func preflight(_ plan: OrganizationPlan) async -> PreflightReport {
+    var issues: [PreflightIssue] = []
+    let inbox = URL(fileURLWithPath: workspace.inboxPath, isDirectory: true)
+    let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    let plannedDirectories = Set(
+      plan.operations.filter { $0.kind == .createDirectory }.map(\.destinationPath))
+    let persistedStates = (try? database.operationStates(planID: plan.id)) ?? [:]
+    var destinations: Set<String> = []
+
+    for operation in plan.operations {
+      let destination = URL(fileURLWithPath: operation.destinationPath)
+      guard PathSafety.contains(library, destination) else {
+        issues.append(.init(operationID: operation.id, message: "目标超出资料库：\(destination.path)"))
+        continue
+      }
+      if !destinations.insert(PathSafety.normalized(destination).path).inserted {
+        issues.append(
+          .init(operationID: operation.id, message: "计划内存在重复目标：\(destination.lastPathComponent)"))
+      }
+      switch operation.kind {
+      case .createDirectory:
+        let recoverableDirectoryState =
+          persistedStates[operation.id] == .running
+          || persistedStates[operation.id] == .completed
+        if fileManager.fileExists(atPath: destination.path), !recoverableDirectoryState {
+          issues.append(
+            .init(operationID: operation.id, message: "建议目录已经存在：\(destination.lastPathComponent)"))
+        }
+        if destination.deletingLastPathComponent() != PathSafety.normalized(library) {
+          issues.append(.init(operationID: operation.id, message: "只能创建资料库第一级目录"))
+        }
+      case .move:
+        guard let sourcePath = operation.sourcePath else {
+          issues.append(.init(operationID: operation.id, message: "移动操作缺少源文件"))
+          continue
+        }
+        let source = URL(fileURLWithPath: sourcePath)
+        if !PathSafety.isDirectChild(source, of: inbox) {
+          issues.append(.init(operationID: operation.id, message: "源文件不是收件箱直接子项"))
+        }
+        let isRecoveredMove =
+          !fileManager.fileExists(atPath: source.path)
+          && operation.preSnapshot?.matches(destination) == true
+          && (persistedStates[operation.id] == .running
+            || persistedStates[operation.id] == .completed)
+        if fileManager.fileExists(atPath: destination.path), !isRecoveredMove {
+          issues.append(
+            .init(operationID: operation.id, message: "目标已存在：\(destination.lastPathComponent)"))
+        }
+        let parent = destination.deletingLastPathComponent().path
+        var isDirectory: ObjCBool = false
+        if !fileManager.fileExists(atPath: parent, isDirectory: &isDirectory)
+          && !plannedDirectories.contains(parent)
+        {
+          issues.append(.init(operationID: operation.id, message: "目标目录不存在"))
+        } else if fileManager.fileExists(atPath: parent, isDirectory: &isDirectory)
+          && !isDirectory.boolValue
+        {
+          issues.append(.init(operationID: operation.id, message: "目标父路径不是目录"))
+        }
+        guard let snapshot = operation.preSnapshot, snapshot.matches(source) || isRecoveredMove
+        else {
+          issues.append(.init(operationID: operation.id, message: "源文件在方案生成后发生变化"))
+          continue
+        }
+        if snapshot.volumeIdentifier != workspace.inboxVolumeID
+          || snapshot.volumeIdentifier != workspace.libraryVolumeID
+        {
+          issues.append(.init(operationID: operation.id, message: "V2.0 不支持跨卷移动"))
+        }
+      }
+    }
+    return PreflightReport(issues: issues)
+  }
+
+  public func execute(_ plan: OrganizationPlan) -> AsyncThrowingStream<ExecutionEvent, Error> {
+    AsyncThrowingStream { continuation in
+      let task = Task.detached(priority: .userInitiated) { [workspace, database, fileManager] in
+        do {
+          let executor = SafePlanExecutor(
+            workspace: workspace, database: database, fileManager: fileManager)
+          try database.savePlan(plan)
+          let report = await executor.preflight(plan)
+          guard report.isReady else {
+            throw OrganizerError.planBlocked(report.issues.map(\.message))
+          }
+          continuation.yield(.started(total: plan.operations.count))
+          var results: [OperationResult] = []
+          let existingStates = try database.operationStates(planID: plan.id)
+          for operation in plan.operations {
+            try Task.checkCancellation()
+            continuation.yield(.operationStarted(operation))
+            if existingStates[operation.id] == .completed {
+              let result = OperationResult(operationID: operation.id, state: .completed)
+              results.append(result)
+              continuation.yield(.operationFinished(result))
+              continue
+            }
+            try database.updateOperation(operation.id, state: .running)
+            let result = executor.apply(operation)
+            try database.updateOperation(operation.id, state: result.state, error: result.error)
+            results.append(result)
+            continuation.yield(.operationFinished(result))
+          }
+          let receipt = ExecutionReceipt(planID: plan.id, results: results)
+          try database.saveReceipt(receipt)
+          continuation.yield(.finished(receipt))
+          continuation.finish()
+        } catch is CancellationError {
+          continuation.finish(throwing: CancellationError())
+        } catch {
+          continuation.finish(throwing: error)
+        }
+      }
+      continuation.onTermination = { _ in task.cancel() }
+    }
+  }
+
+  public func undo(plan: OrganizationPlan, receipt: ExecutionReceipt) -> AsyncThrowingStream<
+    ExecutionEvent, Error
+  > {
+    AsyncThrowingStream { continuation in
+      let task = Task.detached(priority: .userInitiated) { [workspace, database, fileManager] in
+        let completed = Set(receipt.results.filter { $0.state == .completed }.map(\.operationID))
+        let executor = SafePlanExecutor(
+          workspace: workspace, database: database, fileManager: fileManager)
+        var results: [OperationResult] = []
+        continuation.yield(.started(total: completed.count))
+        do {
+          for operation in plan.operations.reversed() where completed.contains(operation.id) {
+            try Task.checkCancellation()
+            continuation.yield(.operationStarted(operation))
+            let result = executor.revert(operation)
+            try database.updateOperation(operation.id, state: result.state, error: result.error)
+            results.append(result)
+            continuation.yield(.operationFinished(result))
+          }
+          let undoReceipt = ExecutionReceipt(planID: plan.id, results: results)
+          continuation.yield(.finished(undoReceipt))
+          continuation.finish()
+        } catch {
+          continuation.finish(throwing: error)
+        }
+      }
+      continuation.onTermination = { _ in task.cancel() }
+    }
+  }
+
+  private func apply(_ operation: PlannedOperation) -> OperationResult {
+    do {
+      switch operation.kind {
+      case .createDirectory:
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: operation.destinationPath, isDirectory: &isDirectory),
+          isDirectory.boolValue
+        {
+          return .init(operationID: operation.id, state: .completed)
+        }
+        try fileManager.createDirectory(
+          at: URL(fileURLWithPath: operation.destinationPath),
+          withIntermediateDirectories: false
+        )
+      case .move:
+        guard let sourcePath = operation.sourcePath else {
+          return .init(operationID: operation.id, state: .failed, error: "缺少源文件")
+        }
+        let source = URL(fileURLWithPath: sourcePath)
+        let destination = URL(fileURLWithPath: operation.destinationPath)
+        if !fileManager.fileExists(atPath: source.path),
+          let snapshot = operation.preSnapshot, snapshot.matches(destination)
+        {
+          return .init(operationID: operation.id, state: .completed)
+        }
+        guard !fileManager.fileExists(atPath: destination.path) else {
+          return .init(operationID: operation.id, state: .blocked, error: "目标已存在")
+        }
+        try fileManager.moveItem(at: source, to: destination)
+      }
+      return .init(operationID: operation.id, state: .completed)
+    } catch {
+      return .init(operationID: operation.id, state: .failed, error: error.localizedDescription)
+    }
+  }
+
+  private func revert(_ operation: PlannedOperation) -> OperationResult {
+    do {
+      switch operation.kind {
+      case .move:
+        guard let sourcePath = operation.sourcePath else {
+          return .init(operationID: operation.id, state: .blocked, error: "缺少原始位置")
+        }
+        let original = URL(fileURLWithPath: sourcePath)
+        let current = URL(fileURLWithPath: operation.destinationPath)
+        guard !fileManager.fileExists(atPath: original.path) else {
+          return .init(operationID: operation.id, state: .blocked, error: "原始位置已被占用")
+        }
+        guard let snapshot = operation.preSnapshot, snapshot.matches(current) else {
+          return .init(operationID: operation.id, state: .blocked, error: "目标文件已被修改或缺失")
+        }
+        try fileManager.moveItem(at: current, to: original)
+      case .createDirectory:
+        let directory = URL(fileURLWithPath: operation.destinationPath, isDirectory: true)
+        guard operation.createdByApp else {
+          return .init(operationID: operation.id, state: .blocked, error: "目录不是由本应用创建")
+        }
+        let children = try fileManager.contentsOfDirectory(atPath: directory.path)
+        guard children.isEmpty else {
+          return .init(operationID: operation.id, state: .blocked, error: "目录非空，未删除")
+        }
+        try fileManager.removeItem(at: directory)
+      }
+      return .init(operationID: operation.id, state: .undone)
+    } catch {
+      return .init(operationID: operation.id, state: .blocked, error: error.localizedDescription)
+    }
+  }
+}

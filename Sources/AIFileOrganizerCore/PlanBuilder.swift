@@ -1,0 +1,110 @@
+import Foundation
+
+public struct PlanBuilder: Sendable {
+  public init() {}
+
+  public func build(
+    sessionID: UUID,
+    workspace: Workspace,
+    items: [ItemSnapshot],
+    destinations: [DestinationProfile],
+    proposals: [ClassificationProposal],
+    folderProposals: [FolderProposal]
+  ) throws -> OrganizationPlan {
+    let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    let itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+    let destinationsByID = Dictionary(uniqueKeysWithValues: destinations.map { ($0.id, $0) })
+    var operations: [PlannedOperation] = []
+    var handledItems: Set<UUID> = []
+    var sequence = 0
+
+    let approvedFolders = folderProposals.filter { $0.status == .approved }
+    for folder in approvedFolders {
+      let name = try PathSafety.validateFolderName(folder.displayName)
+      let destination = try PathSafety.safeDestination(library: library, relativePath: name)
+      operations.append(
+        PlannedOperation(
+          sequence: sequence,
+          kind: .createDirectory,
+          destinationPath: destination.path,
+          createdByApp: true
+        ))
+      sequence += 1
+      for itemID in folder.relatedItemIDs {
+        guard let item = itemsByID[itemID], !handledItems.contains(itemID) else { continue }
+        operations.append(
+          try moveOperation(item: item, destinationDirectory: destination, sequence: sequence))
+        sequence += 1
+        handledItems.insert(itemID)
+      }
+    }
+
+    for proposal in proposals {
+      guard proposal.action == .move, !handledItems.contains(proposal.itemID) else { continue }
+      let isAccepted =
+        proposal.reviewDecision == .ready || proposal.status == .approved
+        || proposal.status == .overridden
+      guard isAccepted, let destinationID = proposal.destinationID,
+        let destination = destinationsByID[destinationID], let item = itemsByID[proposal.itemID]
+      else { continue }
+      let directory = try PathSafety.safeDestination(
+        library: library, relativePath: destination.relativePath)
+      operations.append(
+        try moveOperation(item: item, destinationDirectory: directory, sequence: sequence))
+      sequence += 1
+      handledItems.insert(item.id)
+    }
+
+    return OrganizationPlan(sessionID: sessionID, operations: operations)
+  }
+
+  private func moveOperation(item: ItemSnapshot, destinationDirectory: URL, sequence: Int) throws
+    -> PlannedOperation
+  {
+    let source = URL(fileURLWithPath: item.path)
+    let snapshot = try FileSnapshot.capture(source)
+    return PlannedOperation(
+      sequence: sequence,
+      kind: .move,
+      sourcePath: source.path,
+      destinationPath: destinationDirectory.appendingPathComponent(item.name).path,
+      itemID: item.id,
+      preSnapshot: snapshot
+    )
+  }
+}
+
+extension FileSnapshot {
+  public static func capture(_ url: URL) throws -> FileSnapshot {
+    let values = try url.resourceValues(forKeys: [
+      .fileResourceIdentifierKey, .volumeIdentifierKey, .fileSizeKey,
+      .contentModificationDateKey,
+    ])
+    return FileSnapshot(
+      resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },
+      volumeIdentifier: values.volumeIdentifier.map { String(describing: $0) },
+      size: Int64(values.fileSize ?? 0),
+      modificationDate: values.contentModificationDate
+    )
+  }
+
+  public func matches(_ url: URL) -> Bool {
+    guard let current = try? FileSnapshot.capture(url) else { return false }
+    if let resourceIdentifier, let currentID = current.resourceIdentifier,
+      resourceIdentifier != currentID
+    {
+      return false
+    }
+    if let volumeIdentifier, let currentVolume = current.volumeIdentifier,
+      volumeIdentifier != currentVolume
+    {
+      return false
+    }
+    guard size == current.size else { return false }
+    switch (modificationDate, current.modificationDate) {
+    case (nil, nil): return true
+    case (let lhs?, let rhs?): return abs(lhs.timeIntervalSince(rhs)) < 0.01
+    default: return false
+    }
+  }
+}
