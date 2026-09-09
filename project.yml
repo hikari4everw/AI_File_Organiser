@@ -43,7 +43,7 @@ targets:
       path: Config/Info.plist
       properties:
         CFBundleDevelopmentRegion: zh_CN
-        CFBundleShortVersionString: "2.0.0"
+        CFBundleShortVersionString: "2.1.0"
         CFBundleVersion: "1"
         LSApplicationCategoryType: public.app-category.productivity
         NSHighResolutionCapable: true
