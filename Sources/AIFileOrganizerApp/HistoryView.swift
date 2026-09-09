@@ -17,7 +17,9 @@ struct HistoryView: View {
         }
         ForEach(model.historyEntries, id: \.plan.id) { entry in
           let completed = entry.receipt?.results.filter { $0.state == .completed }.count ?? 0
-          let canUndo = completed > 0
+          let retryableBlocked = entry.receipt?.isUndoReceipt == true
+            ? entry.receipt?.results.filter { $0.state == .blocked }.count ?? 0 : 0
+          let canUndo = completed + retryableBlocked > 0
           let issues = entry.receipt?.results.filter { $0.state == .failed || $0.state == .blocked }.count ?? 0
           HStack(spacing: 16) {
             Image(systemName: issues == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill")

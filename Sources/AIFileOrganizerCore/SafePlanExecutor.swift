@@ -167,13 +167,15 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
   > {
     AsyncThrowingStream { continuation in
       let task = Task.detached(priority: .userInitiated) { [workspace, database, fileManager] in
-        let completed = Set(receipt.results.filter { $0.state == .completed }.map(\.operationID))
+        let retryable = Set(receipt.results.filter {
+          $0.state == .completed || (receipt.isUndoReceipt && $0.state == .blocked)
+        }.map(\.operationID))
         let executor = SafePlanExecutor(
           workspace: workspace, database: database, fileManager: fileManager)
         var results: [OperationResult] = []
-        continuation.yield(.started(total: completed.count))
+        continuation.yield(.started(total: retryable.count))
         do {
-          for operation in plan.operations.reversed() where completed.contains(operation.id) {
+          for operation in plan.operations.reversed() where retryable.contains(operation.id) {
             try Task.checkCancellation()
             continuation.yield(.operationStarted(operation))
             let result = executor.revert(operation)
@@ -184,12 +186,14 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
             results.append(result)
             continuation.yield(.operationFinished(result))
           }
-          let undoReceipt = ExecutionReceipt(planID: plan.id, results: results)
+          let undoReceipt = executor.mergedUndoReceipt(
+            original: receipt, updates: results, wasCancelled: false)
           try database.saveReceipt(undoReceipt)
           continuation.yield(.finished(undoReceipt))
           continuation.finish()
         } catch is CancellationError {
-          let undoReceipt = ExecutionReceipt(planID: plan.id, results: results, wasCancelled: true)
+          let undoReceipt = executor.mergedUndoReceipt(
+            original: receipt, updates: results, wasCancelled: true)
           try? database.saveReceipt(undoReceipt)
           continuation.yield(.finished(undoReceipt))
           continuation.finish(throwing: CancellationError())
@@ -199,6 +203,23 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
       }
       continuation.onTermination = { _ in task.cancel() }
     }
+  }
+
+  private func mergedUndoReceipt(
+    original: ExecutionReceipt,
+    updates: [OperationResult],
+    wasCancelled: Bool
+  ) -> ExecutionReceipt {
+    let updatesByID = Dictionary(uniqueKeysWithValues: updates.map { ($0.operationID, $0) })
+    var merged = original.results.map { updatesByID[$0.operationID] ?? $0 }
+    let existing = Set(merged.map(\.operationID))
+    merged.append(contentsOf: updates.filter { !existing.contains($0.operationID) })
+    return ExecutionReceipt(
+      planID: original.planID,
+      results: merged,
+      wasCancelled: wasCancelled,
+      isUndoReceipt: true
+    )
   }
 
   private func apply(_ operation: PlannedOperation) -> OperationResult {

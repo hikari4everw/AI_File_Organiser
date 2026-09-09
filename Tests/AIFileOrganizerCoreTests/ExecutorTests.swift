@@ -197,6 +197,42 @@ private actor ExecutionProgressRecorder {
     )
   }
 
+  @Test func blockedUndoReceiptKeepsOperationRetryable() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("retry.txt")
+    try Data("original".utf8).write(to: source)
+    let operation = PlannedOperation(
+      sequence: 0,
+      kind: .move,
+      sourcePath: source.path,
+      destinationPath: fixture.docs.appendingPathComponent("retry.txt").path,
+      preSnapshot: try .capture(source)
+    )
+    let plan = OrganizationPlan(sessionID: fixture.sessionID, operations: [operation])
+    let executor = SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)
+    var executionReceipt: ExecutionReceipt?
+    for try await event in executor.execute(plan) {
+      if case .finished(let value) = event { executionReceipt = value }
+    }
+    try Data("occupied".utf8).write(to: source)
+    var blockedReceipt: ExecutionReceipt?
+    for try await event in executor.undo(plan: plan, receipt: try #require(executionReceipt)) {
+      if case .finished(let value) = event { blockedReceipt = value }
+    }
+    let blocked = try #require(blockedReceipt)
+    #expect(blocked.isUndoReceipt)
+    #expect(blocked.results.first?.state == .blocked)
+
+    try FileManager.default.removeItem(at: source)
+    var retriedReceipt: ExecutionReceipt?
+    for try await event in executor.undo(plan: plan, receipt: blocked) {
+      if case .finished(let value) = event { retriedReceipt = value }
+    }
+    #expect(retriedReceipt?.results.first?.state == .undone)
+    #expect(FileManager.default.fileExists(atPath: source.path))
+  }
+
   private func makeFixture() throws -> (
     root: URL, inbox: URL, library: URL, docs: URL,
     workspace: Workspace, database: AppDatabase, sessionID: UUID

@@ -505,19 +505,24 @@ public struct ExecutionReceipt: Codable, Hashable, Identifiable, Sendable {
   public var completedAt: Date
   public var results: [OperationResult]
   public var wasCancelled: Bool
+  public var isUndoReceipt: Bool
 
   public init(
     id: UUID = UUID(), planID: UUID, completedAt: Date = Date(), results: [OperationResult],
-    wasCancelled: Bool = false
+    wasCancelled: Bool = false,
+    isUndoReceipt: Bool = false
   ) {
     self.id = id
     self.planID = planID
     self.completedAt = completedAt
     self.results = results
     self.wasCancelled = wasCancelled
+    self.isUndoReceipt = isUndoReceipt
   }
 
-  private enum CodingKeys: String, CodingKey { case id, planID, completedAt, results, wasCancelled }
+  private enum CodingKeys: String, CodingKey {
+    case id, planID, completedAt, results, wasCancelled, isUndoReceipt
+  }
 
   public init(from decoder: Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -526,6 +531,7 @@ public struct ExecutionReceipt: Codable, Hashable, Identifiable, Sendable {
     completedAt = try values.decode(Date.self, forKey: .completedAt)
     results = try values.decode([OperationResult].self, forKey: .results)
     wasCancelled = try values.decodeIfPresent(Bool.self, forKey: .wasCancelled) ?? false
+    isUndoReceipt = try values.decodeIfPresent(Bool.self, forKey: .isUndoReceipt) ?? false
   }
 }
 
