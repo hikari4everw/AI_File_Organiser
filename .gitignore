@@ -9,3 +9,5 @@ xcuserdata/
 .xcode-package-cache/
 .xcode-results/
 default.profraw
+.worktrees/
+.superpowers/
