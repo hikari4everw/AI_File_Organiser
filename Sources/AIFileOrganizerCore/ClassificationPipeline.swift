@@ -37,11 +37,30 @@ public struct ClassificationPipeline: Sendable {
     items: [ItemSnapshot],
     destinations: [DestinationProfile]
   ) async -> ClassificationPipelineResult {
+    await run(
+      sessionID: sessionID,
+      items: items,
+      destinations: destinations,
+      progress: { _ in }
+    )
+  }
+
+  public func run(
+    sessionID: UUID,
+    items: [ItemSnapshot],
+    destinations: [DestinationProfile],
+    progress: @escaping OrganizationProgressHandler
+  ) async -> ClassificationPipelineResult {
     var final: [UUID: ClassificationProposal] = [:]
     var candidatesByItem: [UUID: [RankedCandidate]] = [:]
     var ambiguous: [ItemContext] = []
 
-    for item in items {
+    if !Task.isCancelled {
+      await progress(
+        OrganizationProgress(phase: .analyzing, total: items.count, isCancellable: true))
+    }
+    for (index, item) in items.enumerated() {
+      if Task.isCancelled { break }
       let basic = classifier.context(for: item)
       let candidates = classifier.rank(basic, destinations: destinations)
       candidatesByItem[item.id] = candidates
@@ -57,11 +76,27 @@ public struct ClassificationPipeline: Sendable {
         candidatesByItem[item.id] = reranked
         ambiguous.append(enriched)
       }
+      if !Task.isCancelled {
+        await progress(
+          OrganizationProgress(
+            phase: .analyzing,
+            completed: index + 1,
+            total: items.count,
+            isCancellable: true
+          ))
+      }
     }
 
     var modelStatus = provider.availabilityDescription
     var modelByItem: [UUID: ModelProposal] = [:]
-    if provider.isAvailable, !ambiguous.isEmpty {
+    if provider.isAvailable, !ambiguous.isEmpty, !Task.isCancelled {
+      await progress(
+        OrganizationProgress(
+          phase: .aiClassifying,
+          total: ambiguous.count,
+          isIndeterminate: true,
+          isCancellable: true
+        ))
       do {
         let requestedItemIDs = Set(ambiguous.map(\.id))
         let allowedDestinationIDs = Set(destinations.map(\.id))
@@ -82,6 +117,15 @@ public struct ClassificationPipeline: Sendable {
             )
           else { continue }
           modelByItem[raw.itemID] = validated
+        }
+        if !Task.isCancelled {
+          await progress(
+            OrganizationProgress(
+              phase: .aiClassifying,
+              completed: ambiguous.count,
+              total: ambiguous.count,
+              isCancellable: true
+            ))
         }
       } catch {
         modelStatus = "AI 已降级：\(error.localizedDescription)"

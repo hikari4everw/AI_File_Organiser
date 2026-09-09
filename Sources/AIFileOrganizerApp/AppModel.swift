@@ -18,6 +18,7 @@ final class AppModel: ObservableObject {
   @Published var isWorking = false
   @Published var discoveredCount = 0
   @Published var skippedCount = 0
+  @Published var progress: OrganizationProgress?
   @Published var currentPlan: OrganizationPlan?
   @Published var receipt: ExecutionReceipt?
   @Published var lastError: String?
@@ -26,11 +27,23 @@ final class AppModel: ObservableObject {
   private var runningTask: Task<Void, Never>?
 
   init() {
+    let isUITesting = ProcessInfo.processInfo.arguments.contains("-ui-testing-reset")
     do {
       let database = try AppDatabase.applicationDatabase()
       self.database = database
-      if ProcessInfo.processInfo.arguments.contains("-ui-testing-reset") {
+      if isUITesting {
         try database.clearWorkspaces()
+      }
+      if ProcessInfo.processInfo.arguments.contains("-ui-testing-progress-demo") {
+        progress = OrganizationProgress(
+          phase: .analyzing,
+          completed: 37,
+          total: 120,
+          skipped: 2,
+          failed: 1,
+          isCancellable: true
+        )
+        isWorking = true
       }
       if let savedWorkspace = try database.latestWorkspace() {
         do {
@@ -42,7 +55,11 @@ final class AppModel: ObservableObject {
           lastError = error.localizedDescription
         }
       }
-      refreshModelStatus()
+      if isUITesting {
+        modelStatus = "本地 AI 状态将在整理时检查"
+      } else {
+        refreshModelStatus()
+      }
     } catch {
       lastError = "数据库初始化失败：\(error.localizedDescription)"
     }
@@ -76,6 +93,8 @@ final class AppModel: ObservableObject {
       && (!readyProposals.isEmpty || folderProposals.contains { $0.status == .approved })
   }
 
+  var canCancel: Bool { isWorking && progress?.isCancellable == true }
+
   func configure(inbox: URL, library: URL) {
     do {
       let workspace = try SecurityScopedBookmarks.makeWorkspace(inbox: inbox, library: library)
@@ -107,35 +126,73 @@ final class AppModel: ObservableObject {
     let session = OrganizationSession(workspaceID: workspace.id, state: .scanning)
     self.session = session
     try? database.saveSession(session)
+    progress = OrganizationProgress(
+      phase: .scanning,
+      isIndeterminate: true,
+      isCancellable: true
+    )
     runningTask = Task { [weak self] in
       guard let self else { return }
+      defer {
+        if self.session?.id == session.id {
+          self.progress = nil
+          self.isWorking = false
+          self.runningTask = nil
+        }
+      }
       do {
         let access = try SecurityScopedBookmarks.resolve(workspace)
         defer { access.stop() }
         self.destinations = try DestinationIndexer().index(workspace: workspace)
         var scanned: [ItemSnapshot] = []
         for try await event in LocalInboxScanner().scan(workspace, sessionID: session.id) {
+          try Task.checkCancellation()
           switch event {
-          case .started:
+          case .started(let total):
             self.statusMessage = "正在扫描收件箱…"
+            self.setProgress(
+              OrganizationProgress(
+                phase: .scanning,
+                total: total,
+                isCancellable: true
+              ),
+              sessionID: session.id
+            )
           case .discovered(let item):
             scanned.append(item)
             self.items.append(item)
             self.discoveredCount += 1
+            self.updateScanProgress(total: self.progress?.total, sessionID: session.id)
           case .skipped(_, _):
             self.skippedCount += 1
-          case .finished:
-            break
+            self.updateScanProgress(total: self.progress?.total, sessionID: session.id)
+          case .finished(let discovered, let skipped):
+            self.setProgress(
+              OrganizationProgress(
+                phase: .scanning,
+                completed: discovered + skipped,
+                total: discovered + skipped,
+                skipped: skipped,
+                isCancellable: true
+              ),
+              sessionID: session.id
+            )
           }
         }
+        try Task.checkCancellation()
         try database.saveSnapshots(scanned)
         self.updateSession(.proposing)
         self.statusMessage = "正在生成整理方案…"
         let result = await ClassificationPipeline().run(
           sessionID: session.id,
           items: scanned,
-          destinations: self.destinations
+          destinations: self.destinations,
+          progress: { [weak self] value in
+            guard !Task.isCancelled else { return }
+            await self?.setProgress(value, sessionID: session.id)
+          }
         )
+        try Task.checkCancellation()
         self.proposals = result.proposals
         self.folderProposals = result.folderProposals
         self.modelStatus = result.modelStatus
@@ -150,11 +207,11 @@ final class AppModel: ObservableObject {
         self.lastError = error.localizedDescription
         self.updateSession(.failed, finished: true, error: error.localizedDescription)
       }
-      self.isWorking = false
     }
   }
 
   func cancel() {
+    guard canCancel else { return }
     runningTask?.cancel()
     statusMessage = "正在安全停止…"
   }
@@ -316,10 +373,23 @@ final class AppModel: ObservableObject {
       }
       isWorking = true
       updateSession(.preflighting)
-      defer { isWorking = false }
+      progress = OrganizationProgress(
+        phase: .preflighting,
+        total: plan.operations.count,
+        isCancellable: false
+      )
+      defer {
+        progress = nil
+        isWorking = false
+      }
       let access = try SecurityScopedBookmarks.resolve(workspace)
       defer { access.stop() }
-      let report = await SafePlanExecutor(workspace: workspace, database: database).preflight(plan)
+      let report = await SafePlanExecutor(workspace: workspace, database: database).preflight(
+        plan,
+        progress: { [weak self] value in
+          await self?.setProgress(value, sessionID: session.id)
+        }
+      )
       guard report.isReady else {
         throw OrganizerError.planBlocked(report.issues.map(\.message))
       }
@@ -348,15 +418,27 @@ final class AppModel: ObservableObject {
     updateSession(.executing)
     runningTask = Task { [weak self] in
       guard let self else { return }
+      defer {
+        self.progress = nil
+        self.isWorking = false
+        self.runningTask = nil
+      }
       do {
         let access = try SecurityScopedBookmarks.resolve(workspace)
         defer { access.stop() }
         let executor = SafePlanExecutor(workspace: workspace, database: database)
         for try await event in executor.execute(plan) {
+          try Task.checkCancellation()
           switch event {
-          case .started(let total): self.statusMessage = "正在执行 \(total) 项操作…"
+          case .started(let total):
+            self.statusMessage = "正在执行 \(total) 项操作…"
+            self.setProgress(
+              OrganizationProgress(phase: .executing, total: total, isCancellable: true),
+              sessionID: plan.sessionID
+            )
           case .operationStarted: break
           case .operationFinished(let result):
+            self.advanceOperationProgress(result: result, sessionID: plan.sessionID)
             if result.state == .failed || result.state == .blocked {
               self.statusMessage = "部分项目需要处理"
             }
@@ -374,7 +456,6 @@ final class AppModel: ObservableObject {
         self.lastError = error.localizedDescription
         self.updateSession(.failed, finished: true, error: error.localizedDescription)
       }
-      self.isWorking = false
     }
   }
 
@@ -383,23 +464,49 @@ final class AppModel: ObservableObject {
       return
     }
     isWorking = true
+    progress = OrganizationProgress(
+      phase: .undoing,
+      total: receipt.results.filter { $0.state == .completed }.count,
+      isCancellable: true
+    )
     runningTask = Task { [weak self] in
       guard let self else { return }
+      defer {
+        self.progress = nil
+        self.isWorking = false
+        self.runningTask = nil
+      }
       do {
         let access = try SecurityScopedBookmarks.resolve(workspace)
         defer { access.stop() }
         let executor = SafePlanExecutor(workspace: workspace, database: database)
         var finalReceipt: ExecutionReceipt?
         for try await event in executor.undo(plan: plan, receipt: receipt) {
-          if case .finished(let value) = event { finalReceipt = value }
+          try Task.checkCancellation()
+          switch event {
+          case .started(let total):
+            self.setProgress(
+              OrganizationProgress(phase: .undoing, total: total, isCancellable: true),
+              sessionID: plan.sessionID
+            )
+          case .operationStarted:
+            break
+          case .operationFinished(let result):
+            self.advanceOperationProgress(result: result, sessionID: plan.sessionID)
+          case .finished(let value):
+            finalReceipt = value
+          }
         }
         let blocked = finalReceipt?.results.filter { $0.state == .blocked }.count ?? 0
         self.statusMessage = blocked == 0 ? "本次整理已撤销" : "撤销完成，\(blocked) 项因状态变化被保留"
         if blocked == 0 { self.receipt = nil }
       } catch {
-        self.lastError = error.localizedDescription
+        if error is CancellationError {
+          self.statusMessage = "已停止撤销，已完成的项目保持当前状态"
+        } else {
+          self.lastError = error.localizedDescription
+        }
       }
-      self.isWorking = false
     }
   }
 
@@ -432,9 +539,40 @@ final class AppModel: ObservableObject {
     selectedItemID = nil
     discoveredCount = 0
     skippedCount = 0
+    progress = nil
     currentPlan = nil
     receipt = nil
     lastError = nil
+  }
+
+  private func setProgress(_ value: OrganizationProgress, sessionID: UUID) {
+    guard session?.id == sessionID else { return }
+    progress = value
+  }
+
+  private func updateScanProgress(total: Int?, sessionID: UUID) {
+    setProgress(
+      OrganizationProgress(
+        phase: .scanning,
+        completed: discoveredCount + skippedCount,
+        total: total,
+        skipped: skippedCount,
+        isIndeterminate: total == nil,
+        isCancellable: true
+      ),
+      sessionID: sessionID
+    )
+  }
+
+  private func advanceOperationProgress(result: OperationResult, sessionID: UUID) {
+    guard var current = progress, current.phase == .executing || current.phase == .undoing else {
+      return
+    }
+    current.completed = min(current.completed + 1, current.total ?? current.completed + 1)
+    if result.state == .failed || result.state == .blocked {
+      current.failed += 1
+    }
+    setProgress(current, sessionID: sessionID)
   }
 
   private func detachFromFolderProposals(_ itemIDs: Set<UUID>) {

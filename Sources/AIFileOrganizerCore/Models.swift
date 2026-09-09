@@ -440,11 +440,50 @@ public struct DecisionRecord: Codable, Hashable, Identifiable, Sendable {
 }
 
 public enum ScanEvent: Sendable {
-  case started
+  case started(total: Int)
   case discovered(ItemSnapshot)
   case skipped(path: String, reason: String)
   case finished(discovered: Int, skipped: Int)
 }
+
+public enum OrganizationProgressPhase: String, Codable, Hashable, Sendable {
+  case scanning
+  case analyzing
+  case aiClassifying
+  case preflighting
+  case executing
+  case undoing
+}
+
+public struct OrganizationProgress: Codable, Hashable, Sendable {
+  public var phase: OrganizationProgressPhase
+  public var completed: Int
+  public var total: Int?
+  public var skipped: Int
+  public var failed: Int
+  public var isIndeterminate: Bool
+  public var isCancellable: Bool
+
+  public init(
+    phase: OrganizationProgressPhase,
+    completed: Int = 0,
+    total: Int? = nil,
+    skipped: Int = 0,
+    failed: Int = 0,
+    isIndeterminate: Bool = false,
+    isCancellable: Bool = true
+  ) {
+    self.phase = phase
+    self.completed = max(0, completed)
+    self.total = total.map { max(0, $0) }
+    self.skipped = max(0, skipped)
+    self.failed = max(0, failed)
+    self.isIndeterminate = isIndeterminate
+    self.isCancellable = isCancellable
+  }
+}
+
+public typealias OrganizationProgressHandler = @Sendable (OrganizationProgress) async -> Void
 
 public enum ExecutionEvent: Sendable {
   case started(total: Int)

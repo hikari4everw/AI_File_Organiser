@@ -11,7 +11,10 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
     self.fileManager = fileManager
   }
 
-  public func preflight(_ plan: OrganizationPlan) async -> PreflightReport {
+  public func preflight(
+    _ plan: OrganizationPlan,
+    progress: @escaping OrganizationProgressHandler
+  ) async -> PreflightReport {
     var issues: [PreflightIssue] = []
     let inbox = URL(fileURLWithPath: workspace.inboxPath, isDirectory: true)
     let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
@@ -20,7 +23,22 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
     let persistedStates = (try? database.operationStates(planID: plan.id)) ?? [:]
     var destinations: Set<String> = []
 
-    for operation in plan.operations {
+    await progress(
+      OrganizationProgress(
+        phase: .preflighting,
+        total: plan.operations.count,
+        isCancellable: false
+      ))
+    for (index, operation) in plan.operations.enumerated() {
+      if index > 0 {
+        await progress(
+          OrganizationProgress(
+            phase: .preflighting,
+            completed: index,
+            total: plan.operations.count,
+            isCancellable: false
+          ))
+      }
       let destination = URL(fileURLWithPath: operation.destinationPath)
       guard PathSafety.contains(library, destination) else {
         issues.append(.init(operationID: operation.id, message: "目标超出资料库：\(destination.path)"))
@@ -83,6 +101,14 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
         }
       }
     }
+    await progress(
+      OrganizationProgress(
+        phase: .preflighting,
+        completed: plan.operations.count,
+        total: plan.operations.count,
+        failed: Set(issues.map(\.operationID)).count,
+        isCancellable: false
+      ))
     return PreflightReport(issues: issues)
   }
 

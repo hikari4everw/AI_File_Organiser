@@ -21,9 +21,18 @@ public protocol DecisionPolicy: Sendable {
 }
 
 public protocol PlanExecutor: Sendable {
-  func preflight(_ plan: OrganizationPlan) async -> PreflightReport
+  func preflight(
+    _ plan: OrganizationPlan,
+    progress: @escaping OrganizationProgressHandler
+  ) async -> PreflightReport
   func execute(_ plan: OrganizationPlan) -> AsyncThrowingStream<ExecutionEvent, Error>
   func undo(plan: OrganizationPlan, receipt: ExecutionReceipt) -> AsyncThrowingStream<
     ExecutionEvent, Error
   >
+}
+
+extension PlanExecutor {
+  public func preflight(_ plan: OrganizationPlan) async -> PreflightReport {
+    await preflight(plan, progress: { _ in })
+  }
 }

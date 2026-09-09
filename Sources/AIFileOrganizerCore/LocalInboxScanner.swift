@@ -8,7 +8,6 @@ public struct LocalInboxScanner: InboxScanner {
   {
     AsyncThrowingStream { continuation in
       let task = Task.detached(priority: .userInitiated) {
-        continuation.yield(.started)
         let inbox = URL(fileURLWithPath: workspace.inboxPath, isDirectory: true)
         let keys: [URLResourceKey] = [
           .nameKey, .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
@@ -22,6 +21,7 @@ public struct LocalInboxScanner: InboxScanner {
             includingPropertiesForKeys: keys,
             options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
           )
+          continuation.yield(.started(total: urls.count))
           var found = 0
           var skipped = 0
           for url in urls.sorted(by: {

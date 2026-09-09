@@ -18,8 +18,10 @@ struct OrganizerView: View {
           proposalList.frame(minWidth: 620)
           detailPanel.frame(minWidth: 280, idealWidth: 330, maxWidth: 420)
         }
-        Divider()
-        executionBar
+        if !model.isWorking {
+          Divider()
+          executionBar
+        }
       }
     }
     .toolbar {
@@ -30,7 +32,7 @@ struct OrganizerView: View {
           Label("开始整理", systemImage: "sparkles")
         }
         .disabled(model.isWorking)
-        if model.isWorking {
+        if model.canCancel {
           Button("停止", role: .cancel) { model.cancel() }
         }
         Menu {
@@ -74,7 +76,6 @@ struct OrganizerView: View {
       Label(model.modelStatus, systemImage: "apple.intelligence")
         .font(.caption)
         .foregroundStyle(.secondary)
-      if model.isWorking { ProgressView().controlSize(.small) }
     }
     .padding(.horizontal, 22)
     .padding(.vertical, 14)
@@ -88,10 +89,7 @@ struct OrganizerView: View {
           model.receipt == nil ? Color.secondary : Color.green)
       Text(model.statusMessage.isEmpty ? "准备好后，开始一次整理" : model.statusMessage)
         .font(.title3.bold())
-      if model.isWorking {
-        Text("已发现 \(model.discoveredCount) 项，跳过 \(model.skippedCount) 项")
-          .foregroundStyle(.secondary)
-      } else if model.receipt == nil {
+      if !model.isWorking && model.receipt == nil {
         Button("开始整理") { model.startOrganizing() }
           .buttonStyle(.borderedProminent).controlSize(.large)
       }

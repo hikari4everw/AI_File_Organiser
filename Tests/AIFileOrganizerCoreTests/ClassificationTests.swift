@@ -24,6 +24,13 @@ private struct UnavailableProvider: ClassificationProvider {
   { [] }
 }
 
+private actor ProgressRecorder {
+  private var values: [OrganizationProgress] = []
+
+  func record(_ value: OrganizationProgress) { values.append(value) }
+  func snapshot() -> [OrganizationProgress] { values }
+}
+
 @Suite struct ClassificationTests {
   @Test func deterministicImageClassificationIsReady() {
     let session = UUID()
@@ -68,6 +75,53 @@ private struct UnavailableProvider: ClassificationProvider {
     let result = await pipeline.run(sessionID: session, items: [item], destinations: [])
     #expect(result.proposals.first?.reviewDecision == .needsReview)
     #expect(result.proposals.first?.action == .keep)
+  }
+
+  @Test func reportsRealAnalysisAndAIProgress() async {
+    let session = UUID()
+    let item = ItemSnapshot(
+      sessionID: session, path: "/tmp/mystery.bin", name: "mystery.bin", kind: .file)
+    let provider = MockProvider(result: [
+      ModelProposal(itemID: item.id, action: .keep, reason: "test")
+    ])
+    let recorder = ProgressRecorder()
+
+    _ = await ClassificationPipeline(extractor: EmptyExtractor(), provider: provider).run(
+      sessionID: session,
+      items: [item],
+      destinations: [],
+      progress: { value in await recorder.record(value) }
+    )
+
+    let values = await recorder.snapshot()
+    let analysis = values.filter { $0.phase == .analyzing }
+    let ai = values.filter { $0.phase == .aiClassifying }
+    #expect(analysis.map(\.completed) == [0, 1])
+    #expect(analysis.allSatisfy { $0.total == 1 })
+    #expect(ai.first?.isIndeterminate == true)
+    #expect(ai.first?.total == 1)
+    #expect(ai.last?.completed == 1)
+    #expect(ai.last?.isIndeterminate == false)
+  }
+
+  @Test func unavailableModelDoesNotReportFakeAIProgress() async {
+    let session = UUID()
+    let item = ItemSnapshot(
+      sessionID: session, path: "/tmp/mystery.bin", name: "mystery.bin", kind: .file)
+    let recorder = ProgressRecorder()
+
+    _ = await ClassificationPipeline(
+      extractor: EmptyExtractor(), provider: UnavailableProvider()
+    ).run(
+      sessionID: session,
+      items: [item],
+      destinations: [],
+      progress: { value in await recorder.record(value) }
+    )
+
+    let values = await recorder.snapshot()
+    #expect(values.contains { $0.phase == .analyzing })
+    #expect(!values.contains { $0.phase == .aiClassifying })
   }
 
   @Test func invalidModelOutputIsRejectedAtPipelineBoundary() async {

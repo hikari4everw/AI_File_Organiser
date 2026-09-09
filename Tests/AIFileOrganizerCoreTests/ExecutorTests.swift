@@ -3,6 +3,13 @@ import Testing
 
 @testable import AIFileOrganizerCore
 
+private actor ExecutionProgressRecorder {
+  private var values: [OrganizationProgress] = []
+
+  func record(_ value: OrganizationProgress) { values.append(value) }
+  func snapshot() -> [OrganizationProgress] { values }
+}
+
 @Suite struct ExecutorTests {
   @Test func executeAndUndoMoveWithoutOverwrite() async throws {
     let fixture = try makeFixture()
@@ -52,6 +59,35 @@ import Testing
       .preflight(OrganizationPlan(sessionID: fixture.sessionID, operations: [operation]))
     #expect(!report.isReady)
     #expect(report.issues.contains { $0.message.contains("目标已存在") })
+  }
+
+  @Test func preflightProgressReachesOperationTotalAndReportsIssues() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("same.txt")
+    let destinationURL = fixture.docs.appendingPathComponent("same.txt")
+    try Data("source".utf8).write(to: source)
+    try Data("destination".utf8).write(to: destinationURL)
+    let operation = PlannedOperation(
+      sequence: 0,
+      kind: .move,
+      sourcePath: source.path,
+      destinationPath: destinationURL.path,
+      preSnapshot: try .capture(source)
+    )
+    let recorder = ExecutionProgressRecorder()
+
+    _ = await SafePlanExecutor(workspace: fixture.workspace, database: fixture.database).preflight(
+      OrganizationPlan(sessionID: fixture.sessionID, operations: [operation]),
+      progress: { value in await recorder.record(value) }
+    )
+
+    let values = await recorder.snapshot()
+    #expect(values.first?.completed == 0)
+    #expect(values.last?.completed == 1)
+    #expect(values.last?.total == 1)
+    #expect(values.last?.failed == 1)
+    #expect(values.allSatisfy { !$0.isCancellable })
   }
 
   @Test func approvedFolderIsCreatedAndRemovedOnUndo() async throws {
