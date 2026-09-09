@@ -31,6 +31,8 @@ final class AppModel: ObservableObject {
 
   private(set) var database: AppDatabase?
   private var runningTask: Task<Void, Never>?
+  private var planPreparationTask: Task<OrganizationPlan, Error>?
+  private var activeExecutor: SafePlanExecutor?
 
   init() {
     let isUITesting = ProcessInfo.processInfo.arguments.contains("-ui-testing-reset")
@@ -273,10 +275,14 @@ final class AppModel: ObservableObject {
           }
           return generated[item.id]
         }
-        self.folderProposals = result.folderProposals
+        self.folderProposals = result.folderProposals.compactMap { folder in
+          var filtered = folder
+          filtered.relatedItemIDs.removeAll { self.decisionLocks.contains($0) }
+          return filtered.relatedItemIDs.isEmpty ? nil : filtered
+        }
         self.modelStatus = result.modelStatus
-        try database.saveProposals(result.proposals)
-        try database.saveFolderProposals(result.folderProposals)
+        try database.saveProposals(self.proposals)
+        try database.saveFolderProposals(self.folderProposals)
         self.updateSession(.review)
         self.statusMessage = scanned.isEmpty ? "收件箱已经很干净" : "方案已生成，请处理需要确认的项目"
       } catch is CancellationError {
@@ -291,7 +297,12 @@ final class AppModel: ObservableObject {
 
   func cancel() {
     guard canCancel else { return }
-    runningTask?.cancel()
+    if progress?.phase == .executing || progress?.phase == .undoing {
+      activeExecutor?.cancel()
+    } else {
+      runningTask?.cancel()
+      planPreparationTask?.cancel()
+    }
     statusMessage = "正在安全停止…"
   }
 
@@ -441,31 +452,46 @@ final class AppModel: ObservableObject {
     guard let workspace, let session, let database, !isWorking else { return false }
     currentPlan = nil
     do {
-      let plan = try PlanBuilder().build(
-        sessionID: session.id,
-        workspace: workspace,
-        items: items,
-        destinations: destinations,
-        proposals: proposals,
-        folderProposals: folderProposals
-      )
-      guard !plan.operations.isEmpty else {
-        lastError = "当前没有可执行的移动"
-        return false
-      }
       isWorking = true
       updateSession(.preflighting)
       progress = OrganizationProgress(
         phase: .preflighting,
-        total: plan.operations.count,
-        isCancellable: false
+        isIndeterminate: true,
+        isCancellable: true
       )
       defer {
+        planPreparationTask = nil
         progress = nil
         isWorking = false
       }
       let access = try SecurityScopedBookmarks.resolve(workspace)
       defer { access.stop() }
+      let planItems = items
+      let planDestinations = destinations
+      let planProposals = proposals
+      let planFolderProposals = folderProposals
+      let preparation = Task.detached(priority: .userInitiated) {
+        try Task.checkCancellation()
+        return try PlanBuilder().build(
+          sessionID: session.id,
+          workspace: workspace,
+          items: planItems,
+          destinations: planDestinations,
+          proposals: planProposals,
+          folderProposals: planFolderProposals
+        )
+      }
+      planPreparationTask = preparation
+      let plan = try await preparation.value
+      guard !plan.operations.isEmpty else {
+        lastError = "当前没有可执行的移动"
+        return false
+      }
+      progress = OrganizationProgress(
+        phase: .preflighting,
+        total: plan.operations.count,
+        isCancellable: false
+      )
       let report = await SafePlanExecutor(workspace: workspace, database: database).preflight(
         plan,
         progress: { [weak self] value in
@@ -478,6 +504,10 @@ final class AppModel: ObservableObject {
       currentPlan = plan
       statusMessage = "预检通过，请确认执行"
       return true
+    } catch is CancellationError {
+      updateSession(.review)
+      statusMessage = "已取消生成执行计划"
+      return false
     } catch {
       lastError = error.localizedDescription
       updateSession(.review, error: error.localizedDescription)
@@ -504,13 +534,15 @@ final class AppModel: ObservableObject {
         self.progress = nil
         self.isWorking = false
         self.runningTask = nil
+        self.activeExecutor = nil
       }
       do {
         let access = try SecurityScopedBookmarks.resolve(workspace)
         defer { access.stop() }
         let executor = SafePlanExecutor(workspace: workspace, database: database)
+        self.activeExecutor = executor
+        var finalReceipt: ExecutionReceipt?
         for try await event in executor.execute(plan) {
-          try Task.checkCancellation()
           switch event {
           case .started(let total):
             self.statusMessage = "正在执行 \(total) 项操作…"
@@ -524,16 +556,27 @@ final class AppModel: ObservableObject {
             if result.state == .failed || result.state == .blocked {
               self.statusMessage = "部分项目需要处理"
             }
-          case .finished(let receipt): self.receipt = receipt
+          case .finished(let receipt):
+            finalReceipt = receipt
+            self.receipt = receipt
           }
         }
+        guard finalReceipt != nil else {
+          throw OrganizerError.operationFailed("执行流提前结束，未收到最终回执")
+        }
+        let wasCancelled = finalReceipt?.wasCancelled == true
         let hasFailure =
-          self.receipt?.results.contains { $0.state == .failed || $0.state == .blocked } ?? false
-        self.updateSession(hasFailure ? .partial : .completed, finished: true)
-        self.statusMessage = hasFailure ? "整理部分完成" : "整理完成"
+          finalReceipt?.results.contains { $0.state == .failed || $0.state == .blocked } ?? false
+        self.updateSession(wasCancelled || hasFailure ? .partial : .completed, finished: true)
+        self.statusMessage = wasCancelled
+          ? "已停止，已完成的项目保持不变"
+          : (hasFailure ? "整理部分完成" : "整理完成")
         self.refreshHistory()
         self.refreshLearningCount()
       } catch is CancellationError {
+        self.receipt = try? database.receipt(planID: plan.id)
+        self.refreshHistory()
+        self.refreshLearningCount()
         self.updateSession(.partial, finished: true)
         self.statusMessage = "已停止，已完成的项目保持不变"
       } catch {
@@ -559,14 +602,15 @@ final class AppModel: ObservableObject {
         self.progress = nil
         self.isWorking = false
         self.runningTask = nil
+        self.activeExecutor = nil
       }
       do {
         let access = try SecurityScopedBookmarks.resolve(workspace)
         defer { access.stop() }
         let executor = SafePlanExecutor(workspace: workspace, database: database)
+        self.activeExecutor = executor
         var finalReceipt: ExecutionReceipt?
         for try await event in executor.undo(plan: plan, receipt: receipt) {
-          try Task.checkCancellation()
           switch event {
           case .started(let total):
             self.setProgress(
@@ -581,13 +625,24 @@ final class AppModel: ObservableObject {
             finalReceipt = value
           }
         }
+        guard finalReceipt != nil else {
+          throw OrganizerError.operationFailed("撤销流提前结束，未收到最终回执")
+        }
         let blocked = finalReceipt?.results.filter { $0.state == .blocked }.count ?? 0
-        self.statusMessage = blocked == 0 ? "本次整理已撤销" : "撤销完成，\(blocked) 项因状态变化被保留"
-        self.receipt = blocked == 0 ? nil : finalReceipt
+        if finalReceipt?.wasCancelled == true {
+          self.statusMessage = "已停止撤销，已完成的项目保持当前状态"
+          self.receipt = finalReceipt
+        } else {
+          self.statusMessage = blocked == 0 ? "本次整理已撤销" : "撤销完成，\(blocked) 项因状态变化被保留"
+          self.receipt = blocked == 0 ? nil : finalReceipt
+        }
         self.refreshHistory()
         self.refreshLearningCount()
       } catch {
         if error is CancellationError {
+          self.receipt = try? database.receipt(planID: plan.id)
+          self.refreshHistory()
+          self.refreshLearningCount()
           self.statusMessage = "已停止撤销，已完成的项目保持当前状态"
         } else {
           self.lastError = error.localizedDescription
@@ -674,6 +729,7 @@ final class AppModel: ObservableObject {
   }
 
   private func resetSession() {
+    activeExecutor?.cancel()
     runningTask?.cancel()
     session = nil
     items = []

@@ -125,7 +125,12 @@ private actor ExecutionProgressRecorder {
     let created = fixture.library.appendingPathComponent("Research", isDirectory: true)
     #expect(FileManager.default.fileExists(atPath: created.path))
     let unwrapped = try #require(receipt)
-    for try await _ in executor.undo(plan: plan, receipt: unwrapped) {}
+    var undoReceipt: ExecutionReceipt?
+    for try await event in executor.undo(plan: plan, receipt: unwrapped) {
+      if case .finished(let value) = event { undoReceipt = value }
+    }
+    #expect(undoReceipt?.results.first { $0.operationID == plan.operations[0].id }?.error == nil)
+    #expect(undoReceipt?.results.allSatisfy { $0.state == .undone } == true)
     #expect(!FileManager.default.fileExists(atPath: created.path))
     #expect(FileManager.default.fileExists(atPath: source.path))
   }
@@ -195,6 +200,34 @@ private actor ExecutionProgressRecorder {
       try LearningService(database: fixture.database).activeSamples(libraryID: fixture.workspace.id)
         .isEmpty
     )
+    for try await _ in executor.execute(plan) {}
+    #expect(
+      try LearningService(database: fixture.database).activeSamples(libraryID: fixture.workspace.id)
+        .count == 1
+    )
+  }
+
+  @Test func cancellationFinishesAndPersistsReceiptBeforeStreamEnds() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("cancel.txt")
+    try Data("cancel".utf8).write(to: source)
+    let operation = PlannedOperation(
+      sequence: 0, kind: .move, sourcePath: source.path,
+      destinationPath: fixture.docs.appendingPathComponent("cancel.txt").path,
+      preSnapshot: try .capture(source))
+    let plan = OrganizationPlan(sessionID: fixture.sessionID, operations: [operation])
+    let executor = SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)
+    executor.cancel()
+    var finished: ExecutionReceipt?
+    do {
+      for try await event in executor.execute(plan) {
+        if case .finished(let receipt) = event { finished = receipt }
+      }
+    } catch is CancellationError {}
+    let receipt = try #require(finished)
+    #expect(receipt.wasCancelled)
+    #expect(try fixture.database.receipt(planID: plan.id)?.id == receipt.id)
   }
 
   @Test func blockedUndoReceiptKeepsOperationRetryable() async throws {
@@ -231,6 +264,33 @@ private actor ExecutionProgressRecorder {
     }
     #expect(retriedReceipt?.results.first?.state == .undone)
     #expect(FileManager.default.fileExists(atPath: source.path))
+  }
+
+  @Test func staleFolderProposalCannotOverrideManualDestination() throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("manual.pdf")
+    try Data("manual".utf8).write(to: source)
+    let item = ItemSnapshot(
+      sessionID: fixture.sessionID, path: source.path, name: source.lastPathComponent,
+      kind: .file, fileExtension: "pdf")
+    let manualDestination = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let manual = ClassificationProposal(
+      sessionID: fixture.sessionID, itemID: item.id, action: .move,
+      destinationID: manualDestination.id, source: .user, reviewDecision: .ready,
+      status: .overridden, reason: "manual")
+    let stale = FolderProposal(
+      sessionID: fixture.sessionID, normalizedName: "research", displayName: "Research",
+      status: .approved, relatedItemIDs: [item.id])
+
+    let plan = try PlanBuilder().build(
+      sessionID: fixture.sessionID, workspace: fixture.workspace,
+      items: [item], destinations: [manualDestination], proposals: [manual],
+      folderProposals: [stale])
+
+    let move = try #require(plan.operations.first { $0.kind == .move })
+    #expect(move.destinationPath == fixture.docs.appendingPathComponent("manual.pdf").path)
+    #expect(!plan.operations.contains { $0.kind == .createDirectory })
   }
 
   private func makeFixture() throws -> (

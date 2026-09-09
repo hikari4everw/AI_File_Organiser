@@ -38,7 +38,7 @@ public enum OperationKind: String, Codable, Sendable {
 }
 
 public enum OperationState: String, Codable, Sendable {
-  case pending, running, completed, failed, undone, blocked
+  case pending, running, completed, undoing, failed, undone, blocked, undoBlocked
 }
 
 public struct Workspace: Codable, Hashable, Identifiable, Sendable {
@@ -381,6 +381,7 @@ public struct FolderProposal: Codable, Hashable, Identifiable, Sendable {
 }
 
 public struct FileSnapshot: Codable, Hashable, Sendable {
+  public var formatVersion: Int
   public var resourceIdentifier: String?
   public var volumeIdentifier: String?
   public var size: Int64
@@ -389,8 +390,9 @@ public struct FileSnapshot: Codable, Hashable, Sendable {
 
   public init(
     resourceIdentifier: String?, volumeIdentifier: String?, size: Int64, modificationDate: Date?,
-    directoryManifest: DirectoryManifest? = nil
+    directoryManifest: DirectoryManifest? = nil, formatVersion: Int = 2
   ) {
+    self.formatVersion = formatVersion
     self.resourceIdentifier = resourceIdentifier
     self.volumeIdentifier = volumeIdentifier
     self.size = size
@@ -399,11 +401,13 @@ public struct FileSnapshot: Codable, Hashable, Sendable {
   }
 
   private enum CodingKeys: String, CodingKey {
-    case resourceIdentifier, volumeIdentifier, size, modificationDate, directoryManifest
+    case formatVersion, resourceIdentifier, volumeIdentifier, size, modificationDate
+    case directoryManifest
   }
 
   public init(from decoder: Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
+    formatVersion = try values.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1
     resourceIdentifier = try values.decodeIfPresent(String.self, forKey: .resourceIdentifier)
     volumeIdentifier = try values.decodeIfPresent(String.self, forKey: .volumeIdentifier)
     size = try values.decode(Int64.self, forKey: .size)
@@ -506,11 +510,11 @@ public struct ExecutionReceipt: Codable, Hashable, Identifiable, Sendable {
   public var results: [OperationResult]
   public var wasCancelled: Bool
   public var isUndoReceipt: Bool
+  public var isFinal: Bool
 
   public init(
     id: UUID = UUID(), planID: UUID, completedAt: Date = Date(), results: [OperationResult],
-    wasCancelled: Bool = false,
-    isUndoReceipt: Bool = false
+    wasCancelled: Bool = false, isUndoReceipt: Bool = false, isFinal: Bool = true
   ) {
     self.id = id
     self.planID = planID
@@ -518,10 +522,11 @@ public struct ExecutionReceipt: Codable, Hashable, Identifiable, Sendable {
     self.results = results
     self.wasCancelled = wasCancelled
     self.isUndoReceipt = isUndoReceipt
+    self.isFinal = isFinal
   }
 
   private enum CodingKeys: String, CodingKey {
-    case id, planID, completedAt, results, wasCancelled, isUndoReceipt
+    case id, planID, completedAt, results, wasCancelled, isUndoReceipt, isFinal
   }
 
   public init(from decoder: Decoder) throws {
@@ -532,6 +537,7 @@ public struct ExecutionReceipt: Codable, Hashable, Identifiable, Sendable {
     results = try values.decode([OperationResult].self, forKey: .results)
     wasCancelled = try values.decodeIfPresent(Bool.self, forKey: .wasCancelled) ?? false
     isUndoReceipt = try values.decodeIfPresent(Bool.self, forKey: .isUndoReceipt) ?? false
+    isFinal = try values.decodeIfPresent(Bool.self, forKey: .isFinal) ?? true
   }
 }
 

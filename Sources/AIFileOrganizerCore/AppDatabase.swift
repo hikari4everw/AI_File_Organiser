@@ -14,9 +14,9 @@ public final class AppDatabase: @unchecked Sendable {
     }
     queue = try DatabaseQueue(path: path, configuration: configuration)
     encoder = JSONEncoder()
-    encoder.dateEncodingStrategy = .iso8601
+    encoder.dateEncodingStrategy = Self.preciseDateEncodingStrategy
     decoder = JSONDecoder()
-    decoder.dateDecodingStrategy = .iso8601
+    decoder.dateDecodingStrategy = Self.compatibleDateDecodingStrategy
     try migrate()
   }
 
@@ -42,10 +42,44 @@ public final class AppDatabase: @unchecked Sendable {
   private init(queue: DatabaseQueue) throws {
     self.queue = queue
     encoder = JSONEncoder()
-    encoder.dateEncodingStrategy = .iso8601
+    encoder.dateEncodingStrategy = Self.preciseDateEncodingStrategy
     decoder = JSONDecoder()
-    decoder.dateDecodingStrategy = .iso8601
+    decoder.dateDecodingStrategy = Self.compatibleDateDecodingStrategy
     try migrate()
+  }
+
+  private static var preciseDateEncodingStrategy: JSONEncoder.DateEncodingStrategy {
+    .custom { date, encoder in
+      var container = encoder.singleValueContainer()
+      let bits = String(date.timeIntervalSinceReferenceDate.bitPattern, radix: 16)
+      try container.encode("date-bits:\(bits)")
+    }
+  }
+
+  private static var compatibleDateDecodingStrategy: JSONDecoder.DateDecodingStrategy {
+    .custom { decoder in
+      let container = try decoder.singleValueContainer()
+      if let value = try? container.decode(String.self) {
+        if value.hasPrefix("date-bits:"),
+          let bits = UInt64(value.dropFirst("date-bits:".count), radix: 16)
+        {
+          return Date(timeIntervalSinceReferenceDate: Double(bitPattern: bits))
+        }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let legacy = ISO8601DateFormatter()
+        legacy.formatOptions = [.withInternetDateTime]
+        if let date = legacy.date(from: value) { return date }
+        throw DecodingError.dataCorruptedError(
+          in: container, debugDescription: "无法解析日期：\(value)")
+      }
+      if let seconds = try? container.decode(Double.self) {
+        return Date(timeIntervalSince1970: seconds)
+      }
+      throw DecodingError.dataCorruptedError(
+        in: container, debugDescription: "无法解析日期")
+    }
   }
 
   private func migrate() throws {
@@ -348,6 +382,67 @@ public final class AppDatabase: @unchecked Sendable {
     }
   }
 
+  public func finishOperation(
+    _ id: UUID,
+    state: OperationState,
+    error: String? = nil,
+    learningSample: LearningSample? = nil
+  ) throws {
+    let samplePayload = try learningSample.map(encode)
+    try queue.write { db in
+      try db.execute(
+        sql: "UPDATE operations SET state = ?, error = ?, updated_at = ? WHERE id = ?",
+        arguments: [state.rawValue, error, Date(), id.uuidString])
+      guard let sample = learningSample, let payload = samplePayload else { return }
+      try db.execute(
+        sql: """
+          INSERT INTO learning_events (id, operation_id, state, payload_json)
+          VALUES (?, ?, 'active', ?)
+          ON CONFLICT(operation_id) DO UPDATE SET state = 'active', payload_json = excluded.payload_json
+          """,
+        arguments: [UUID().uuidString, id.uuidString, payload])
+      try db.execute(
+        sql: """
+          INSERT INTO learning_samples
+          (id, library_id, operation_id, item_identity, destination_id, is_active, payload_json, created_at)
+          VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+          ON CONFLICT(operation_id) DO UPDATE SET
+          library_id = excluded.library_id,
+          item_identity = excluded.item_identity,
+          destination_id = excluded.destination_id,
+          is_active = 1,
+          payload_json = excluded.payload_json,
+          created_at = excluded.created_at
+          """,
+        arguments: [
+          sample.id.uuidString, sample.libraryID.uuidString, id.uuidString,
+          sample.itemIdentity, sample.destinationID.uuidString, payload, sample.createdAt,
+        ])
+    }
+  }
+
+  public func finishUndoOperation(_ id: UUID, result: OperationResult) throws {
+    try queue.write { db in
+      let persistedState: OperationState = result.state == .blocked ? .undoBlocked : result.state
+      try db.execute(
+        sql: "UPDATE operations SET state = ?, error = ?, updated_at = ? WHERE id = ?",
+        arguments: [persistedState.rawValue, result.error, Date(), id.uuidString])
+      guard result.state == .undone,
+        let data: Data = try Data.fetchOne(
+          db, sql: "SELECT payload_json FROM learning_samples WHERE operation_id = ?",
+          arguments: [id.uuidString])
+      else { return }
+      var sample = try decode(LearningSample.self, from: data)
+      sample.isActive = false
+      try db.execute(
+        sql: "UPDATE learning_samples SET is_active = 0, payload_json = ? WHERE operation_id = ?",
+        arguments: [try encode(sample), id.uuidString])
+      try db.execute(
+        sql: "UPDATE learning_events SET state = 'retracted' WHERE operation_id = ?",
+        arguments: [id.uuidString])
+    }
+  }
+
   public func operationStates(planID: UUID) throws -> [UUID: OperationState] {
     try queue.read { db in
       let rows = try Row.fetchAll(
@@ -369,7 +464,7 @@ public final class AppDatabase: @unchecked Sendable {
       try db.execute(
         sql: "UPDATE plans SET status = ?, receipt_json = ? WHERE id = ?",
         arguments: [
-          receipt.wasCancelled
+          !receipt.isFinal || receipt.wasCancelled
             || receipt.results.contains(where: { $0.state == .failed || $0.state == .blocked })
             ? "partial" : "completed",
           payload, receipt.planID.uuidString,

@@ -23,10 +23,21 @@ public struct DirectoryManifestEntry: Codable, Hashable, Sendable {
 }
 
 public struct DirectoryManifest: Codable, Hashable, Sendable {
+  public var formatVersion: Int
   public var entries: [DirectoryManifestEntry]
 
-  public init(entries: [DirectoryManifestEntry]) {
+  public init(entries: [DirectoryManifestEntry], formatVersion: Int = 2) {
+    self.formatVersion = formatVersion
     self.entries = entries.sorted { $0.relativePath < $1.relativePath }
+  }
+
+  private enum CodingKeys: String, CodingKey { case formatVersion, entries }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    formatVersion = try values.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1
+    entries = try values.decode([DirectoryManifestEntry].self, forKey: .entries)
+      .sorted { $0.relativePath < $1.relativePath }
   }
 
   public static func capture(
@@ -45,6 +56,7 @@ public struct DirectoryManifest: Codable, Hashable, Sendable {
     )).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     var entries: [DirectoryManifestEntry] = []
     while !pending.isEmpty {
+      if Task.isCancelled { throw CancellationError() }
       let url = pending.removeFirst()
       guard entries.count < maximumEntries else {
         throw OrganizerError.scanFailed("目录内容超过安全检查上限：\(maximumEntries) 项")
@@ -79,11 +91,19 @@ public struct DirectoryManifest: Codable, Hashable, Sendable {
   }
 
   public func matches(_ directory: URL, fileManager: FileManager = .default) -> Bool {
+    guard formatVersion >= 2 else { return false }
     guard let current = try? Self.capture(
       directory,
       fileManager: fileManager,
       maximumEntries: max(entries.count + 1, 1)
     ) else { return false }
-    return current == self
+    guard current.entries.count == entries.count else { return false }
+    return zip(entries, current.entries).allSatisfy { expected, actual in
+      expected.relativePath == actual.relativePath
+        && expected.kind == actual.kind
+        && expected.resourceIdentifier == actual.resourceIdentifier
+        && expected.size == actual.size
+        && expected.modificationDate == actual.modificationDate
+    }
   }
 }

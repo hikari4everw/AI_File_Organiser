@@ -22,6 +22,15 @@ public struct PlanBuilder: Sendable {
     for folder in approvedFolders {
       let name = try PathSafety.validateFolderName(folder.displayName)
       let destination = try PathSafety.safeDestination(library: library, relativePath: name)
+      let eligibleItemIDs = folder.relatedItemIDs.filter { itemID in
+        guard itemsByID[itemID] != nil, !handledItems.contains(itemID),
+          let itemProposal = proposals.first(where: { $0.itemID == itemID })
+        else { return false }
+        return itemProposal.action == .suggestFolder
+          && PathSafety.normalizedFolderKey(itemProposal.suggestedFolderName ?? "")
+            == folder.normalizedName
+      }
+      guard !eligibleItemIDs.isEmpty else { continue }
       operations.append(
         PlannedOperation(
           sequence: sequence,
@@ -30,8 +39,8 @@ public struct PlanBuilder: Sendable {
           createdByApp: true
         ))
       sequence += 1
-      for itemID in folder.relatedItemIDs {
-        guard let item = itemsByID[itemID], !handledItems.contains(itemID) else { continue }
+      for itemID in eligibleItemIDs {
+        guard let item = itemsByID[itemID] else { continue }
         operations.append(
           try moveOperation(
             item: item,
@@ -102,12 +111,13 @@ public struct PlanBuilder: Sendable {
 
 extension FileSnapshot {
   public static func capture(_ url: URL) throws -> FileSnapshot {
-    let values = try url.resourceValues(forKeys: [
+    let currentURL = URL(fileURLWithPath: url.path, isDirectory: url.hasDirectoryPath)
+    let values = try currentURL.resourceValues(forKeys: [
       .fileResourceIdentifierKey, .volumeIdentifierKey, .fileSizeKey,
       .contentModificationDateKey, .isDirectoryKey, .isPackageKey,
     ])
     let manifest = values.isDirectory == true && values.isPackage != true
-      ? try DirectoryManifest.capture(url)
+      ? try DirectoryManifest.capture(currentURL)
       : nil
     return FileSnapshot(
       resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },
@@ -119,6 +129,7 @@ extension FileSnapshot {
   }
 
   public func matches(_ url: URL) -> Bool {
+    guard formatVersion >= 2 else { return false }
     guard let current = try? FileSnapshot.capture(url) else { return false }
     if let resourceIdentifier, let currentID = current.resourceIdentifier,
       resourceIdentifier != currentID
@@ -134,7 +145,7 @@ extension FileSnapshot {
     let dateMatches: Bool
     switch (modificationDate, current.modificationDate) {
     case (nil, nil): dateMatches = true
-    case (let lhs?, let rhs?): dateMatches = abs(lhs.timeIntervalSince(rhs)) < 0.01
+    case (let lhs?, let rhs?): dateMatches = lhs == rhs
     default: dateMatches = false
     }
     guard dateMatches else { return false }

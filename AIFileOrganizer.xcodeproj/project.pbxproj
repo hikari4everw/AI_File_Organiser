@@ -22,6 +22,7 @@
 		4513E15FE39CB89A3B1AA381 /* ExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 791E61C175960E8A03890F05 /* ExecutorTests.swift */; };
 		494FAD59983B3FA78D141DE7 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3E5B543CAEE96072303F753 /* AppModel.swift */; };
 		524362AE5FD359049A77F744 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6774DCEDEBC2A1E153B0AFAE /* ContentView.swift */; };
+		56BCB989E93D4417ACFAD967 /* DirectoryOwnership.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA5C1A1ED594B79D47B18EF4 /* DirectoryOwnership.swift */; };
 		5BC5FB458333DD3B2FAC052E /* SecurityScopedBookmarks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50AFD7F8CF22C4CB4C2795F3 /* SecurityScopedBookmarks.swift */; };
 		5C99D7DCEDF828E3EF37ACF3 /* SafePlanExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B950D15B647E4819973F5E61 /* SafePlanExecutor.swift */; };
 		656A17DF5FDE601CD04FF33F /* AIFileOrganizerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C495EF35FF3A6D3CEFF2A8AC /* AIFileOrganizerUITests.swift */; };
@@ -149,6 +150,7 @@
 		D68F6A26C1F351054C071E77 /* RuleEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleEngine.swift; sourceTree = "<group>"; };
 		D9A1A034EB0577CC922969F7 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		DE161B9801B27CC392BA3931 /* DestinationIndexer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationIndexer.swift; sourceTree = "<group>"; };
+		EA5C1A1ED594B79D47B18EF4 /* DirectoryOwnership.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectoryOwnership.swift; sourceTree = "<group>"; };
 		EC7746E924DEDA681ACF75E9 /* AppleRuleInterpreter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleRuleInterpreter.swift; sourceTree = "<group>"; };
 		F061D79BEBC6BDBACA805C9D /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
 		FA22CC36D58571F2D5435032 /* PathSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathSafetyTests.swift; sourceTree = "<group>"; };
@@ -261,6 +263,7 @@
 				BA2D460AEE2B9B2048165A95 /* DeterministicClassifier.swift */,
 				432A2A931082AE61758FA4AC /* DirectoryAnalyzer.swift */,
 				745C71A263EF8328CC092EF2 /* DirectoryManifest.swift */,
+				EA5C1A1ED594B79D47B18EF4 /* DirectoryOwnership.swift */,
 				F061D79BEBC6BDBACA805C9D /* HistoryStore.swift */,
 				3272FE88BF5588AE7F0A2AEF /* LearningModels.swift */,
 				3443A5E7D01109700A0E3A55 /* LearningService.swift */,
@@ -417,6 +420,7 @@
 				E9F8E45E0D4161E5B13AC8C7 /* DeterministicClassifier.swift in Sources */,
 				8FC9B32683A519E507659B1D /* DirectoryAnalyzer.swift in Sources */,
 				970CE9D73560C520466ABDC6 /* DirectoryManifest.swift in Sources */,
+				56BCB989E93D4417ACFAD967 /* DirectoryOwnership.swift in Sources */,
 				18CE3227DC849AECD8EDD819 /* HistoryStore.swift in Sources */,
 				CE2A15A2B33FA3404BF7CD14 /* LearningModels.swift in Sources */,
 				EA40EA05647BEF6A201CBCCC /* LearningService.swift in Sources */,
