@@ -129,6 +129,50 @@ public final class AppDatabase: @unchecked Sendable {
         table.column("created_at", .datetime).notNull()
       }
     }
+    migrator.registerMigration("v2.1-catalog-learning") { db in
+      try db.create(table: "libraries") { table in
+        table.column("id", .text).primaryKey()
+        table.column("workspace_id", .text).notNull().indexed()
+        table.column("payload_json", .blob)
+      }
+      try db.create(table: "destinations") { table in
+        table.column("id", .text).primaryKey()
+        table.column("library_id", .text).notNull().indexed()
+        table.column("relative_path", .text).notNull()
+        table.column("kind", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.uniqueKey(["library_id", "relative_path"])
+      }
+      try db.create(table: "organization_rules") { table in
+        table.column("id", .text).primaryKey()
+        table.column("workspace_id", .text).notNull().indexed()
+        table.column("destination_id", .text).notNull()
+        table.column("is_enabled", .boolean).notNull()
+        table.column("payload_json", .blob).notNull()
+      }
+      try db.create(table: "learning_events") { table in
+        table.column("id", .text).primaryKey()
+        table.column("operation_id", .text).notNull().unique()
+        table.column("state", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+      }
+      try db.create(table: "learning_samples") { table in
+        table.column("id", .text).primaryKey()
+        table.column("library_id", .text).notNull().indexed()
+        table.column("operation_id", .text).unique()
+        table.column("item_identity", .text).notNull()
+        table.column("destination_id", .text).notNull()
+        table.column("is_active", .boolean).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.column("created_at", .datetime).notNull()
+      }
+      try db.create(table: "rule_suggestions") { table in
+        table.column("id", .text).primaryKey()
+        table.column("library_id", .text).notNull().indexed()
+        table.column("state", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+      }
+    }
     try migrator.migrate(queue)
   }
 
@@ -327,6 +371,84 @@ public final class AppDatabase: @unchecked Sendable {
     }
   }
 
+  public func plan(id: UUID) throws -> OrganizationPlan? {
+    try queue.read { db in
+      guard let data: Data = try Data.fetchOne(
+        db, sql: "SELECT payload_json FROM plans WHERE id = ?", arguments: [id.uuidString]
+      ) else { return nil }
+      return try decode(OrganizationPlan.self, from: data)
+    }
+  }
+
+  public func plans(workspaceID: UUID) throws -> [OrganizationPlan] {
+    try queue.read { db in
+      let rows = try Data.fetchAll(
+        db,
+        sql: """
+          SELECT plans.payload_json FROM plans
+          JOIN sessions ON sessions.id = plans.session_id
+          WHERE sessions.workspace_id = ?
+          ORDER BY plans.confirmed_at DESC
+          """,
+        arguments: [workspaceID.uuidString]
+      )
+      return try rows.map { try decode(OrganizationPlan.self, from: $0) }
+    }
+  }
+
+  public func saveLearningSample(_ sample: LearningSample) throws {
+    let payload = try encode(sample)
+    try queue.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO learning_samples
+          (id, library_id, operation_id, item_identity, destination_id, is_active, payload_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(operation_id) DO NOTHING
+          """,
+        arguments: [
+          sample.id.uuidString,
+          sample.libraryID.uuidString,
+          sample.operationID?.uuidString,
+          sample.itemIdentity,
+          sample.destinationID.uuidString,
+          sample.isActive,
+          payload,
+          sample.createdAt,
+        ]
+      )
+    }
+  }
+
+  public func learningSamples(libraryID: UUID, activeOnly: Bool = false) throws
+    -> [LearningSample]
+  {
+    try queue.read { db in
+      let sql = activeOnly
+        ? "SELECT payload_json FROM learning_samples WHERE library_id = ? AND is_active = 1 ORDER BY created_at"
+        : "SELECT payload_json FROM learning_samples WHERE library_id = ? ORDER BY created_at"
+      return try Data.fetchAll(db, sql: sql, arguments: [libraryID.uuidString]).map {
+        try decode(LearningSample.self, from: $0)
+      }
+    }
+  }
+
+  public func retractLearningSample(operationID: UUID) throws {
+    try queue.write { db in
+      guard let data: Data = try Data.fetchOne(
+        db,
+        sql: "SELECT payload_json FROM learning_samples WHERE operation_id = ?",
+        arguments: [operationID.uuidString]
+      ) else { return }
+      var sample = try decode(LearningSample.self, from: data)
+      sample.isActive = false
+      try db.execute(
+        sql: "UPDATE learning_samples SET is_active = 0, payload_json = ? WHERE operation_id = ?",
+        arguments: [try encode(sample), operationID.uuidString]
+      )
+    }
+  }
+
   public func saveDecision(_ record: DecisionRecord) throws {
     let payload = try encode(record)
     try queue.write { db in
@@ -344,7 +466,8 @@ public final class AppDatabase: @unchecked Sendable {
   public func rowCount(_ table: String) throws -> Int {
     let allowed = [
       "workspaces", "sessions", "item_snapshots", "proposals", "folder_proposals", "plans",
-      "operations", "decision_records",
+      "operations", "decision_records", "libraries", "destinations", "organization_rules",
+      "learning_events", "learning_samples", "rule_suggestions",
     ]
     guard allowed.contains(table) else { throw OrganizerError.persistenceFailed("未知数据表") }
     return try queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)") ?? 0 }

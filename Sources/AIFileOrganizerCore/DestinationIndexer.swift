@@ -5,35 +5,77 @@ public struct DestinationIndexer: Sendable {
   public init() {}
 
   public func index(workspace: Workspace) throws -> [DestinationProfile] {
-    let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
-    let keys: Set<URLResourceKey> = [.isDirectoryKey, .isHiddenKey]
-    let direct = try FileManager.default.contentsOfDirectory(
-      at: library,
-      includingPropertiesForKeys: Array(keys),
-      options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
-    ).filter { url in
-      let values = try? url.resourceValues(forKeys: keys)
-      return values?.isDirectory == true && values?.isHidden != true
-    }
-    let pinned = workspace.pinnedDestinationPaths.map {
-      URL(fileURLWithPath: $0, isDirectory: true)
-    }
-    .filter { PathSafety.contains(library, $0) }
-    let unique = Dictionary(grouping: direct + pinned, by: { PathSafety.normalized($0).path })
+    try index(workspace: workspace, maxDepth: 1)
+  }
 
-    return unique.keys.sorted().map { path in
-      let url = URL(fileURLWithPath: path, isDirectory: true)
-      let relative = relativePath(of: url, inside: library)
+  public func index(
+    workspace: Workspace,
+    maxDepth: Int,
+    kindsByRelativePath: [String: DestinationKind] = [:]
+  ) throws -> [DestinationProfile] {
+    let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    let boundedDepth = max(1, maxDepth)
+    var discovered: [(URL, String, Int, DestinationKind)] = []
+    try discover(
+      parent: library,
+      root: library,
+      depth: 1,
+      maxDepth: boundedDepth,
+      kinds: kindsByRelativePath,
+      output: &discovered
+    )
+    return discovered.map { url, relative, depth, kind in
       let samples = sampleTypes(in: url)
       return DestinationProfile(
         id: stableUUID(for: relative),
         relativePath: relative,
         displayName: url.lastPathComponent,
-        keywords: KeywordTokenizer.tokens(from: url.lastPathComponent),
+        keywords: KeywordTokenizer.tokens(from: relative),
         sampleContentTypes: samples,
-        isPinned: pinned.contains(where: { PathSafety.normalized($0) == PathSafety.normalized(url) }
-        )
+        isPinned: workspace.pinnedDestinationPaths.contains(url.path),
+        kind: kind,
+        depth: depth
       )
+    }
+  }
+
+  private func discover(
+    parent: URL,
+    root: URL,
+    depth: Int,
+    maxDepth: Int,
+    kinds: [String: DestinationKind],
+    output: inout [(URL, String, Int, DestinationKind)]
+  ) throws {
+    guard depth <= maxDepth else { return }
+    let keys: Set<URLResourceKey> = [
+      .isDirectoryKey, .isHiddenKey, .isSymbolicLinkKey, .isPackageKey,
+    ]
+    let children = try FileManager.default.contentsOfDirectory(
+      at: parent,
+      includingPropertiesForKeys: Array(keys),
+      options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+    ).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    for child in children {
+      guard let values = try? child.resourceValues(forKeys: keys),
+        values.isDirectory == true,
+        values.isHidden != true,
+        values.isSymbolicLink != true,
+        values.isPackage != true
+      else { continue }
+      let relative = relativePath(of: child, inside: root)
+      let kind = kinds[relative] ?? .category
+      output.append((child, relative, depth, kind))
+      if kind != .excluded && kind != .collection {
+        try discover(
+          parent: child,
+          root: root,
+          depth: depth + 1,
+          maxDepth: maxDepth,
+          kinds: kinds,
+          output: &output
+        )
+      }
     }
   }
 

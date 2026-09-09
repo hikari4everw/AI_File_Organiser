@@ -9,6 +9,10 @@ public enum ItemKind: String, Codable, Sendable {
   case file, directory, applicationBundle
 }
 
+public enum DestinationKind: String, Codable, Hashable, Sendable {
+  case category, collection, uncertain, excluded
+}
+
 public enum ProposalSource: String, Codable, Sendable {
   case deterministic, foundationModel, user
 }
@@ -196,6 +200,8 @@ public struct DestinationProfile: Codable, Hashable, Identifiable, Sendable {
   public var keywords: [String]
   public var sampleContentTypes: [String]
   public var isPinned: Bool
+  public var kind: DestinationKind
+  public var depth: Int
 
   public init(
     id: UUID = UUID(),
@@ -203,7 +209,9 @@ public struct DestinationProfile: Codable, Hashable, Identifiable, Sendable {
     displayName: String,
     keywords: [String] = [],
     sampleContentTypes: [String] = [],
-    isPinned: Bool = false
+    isPinned: Bool = false,
+    kind: DestinationKind = .category,
+    depth: Int = 1
   ) {
     self.id = id
     self.relativePath = relativePath
@@ -211,6 +219,8 @@ public struct DestinationProfile: Codable, Hashable, Identifiable, Sendable {
     self.keywords = keywords
     self.sampleContentTypes = sampleContentTypes
     self.isPinned = isPinned
+    self.kind = kind
+    self.depth = max(1, depth)
   }
 }
 
