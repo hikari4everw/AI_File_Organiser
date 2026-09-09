@@ -299,12 +299,22 @@ struct CoreChecks {
       status: .approved,
       relatedItemIDs: [item.id]
     )
+    let classification = ClassificationProposal(
+      sessionID: fixture.sessionID,
+      itemID: item.id,
+      action: .suggestFolder,
+      suggestedFolderName: "Research",
+      source: .foundationModel,
+      reviewDecision: .needsReview,
+      status: .approved,
+      reason: "check"
+    )
     let plan = try PlanBuilder().build(
       sessionID: fixture.sessionID,
       workspace: fixture.workspace,
       items: [item],
       destinations: [],
-      proposals: [],
+      proposals: [classification],
       folderProposals: [folder]
     )
     let executor = SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)

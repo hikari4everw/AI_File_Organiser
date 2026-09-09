@@ -1,5 +1,5 @@
 {
-  "description": "100-case deterministic baseline generated as 10 filenames for each of 10 destination intents.",
+  "description": "120-case baseline: 100 deterministic filename/type cases plus 20 folder, nested-path, rule-conflict, and path-safety cases.",
   "groups": [
     {"destination":"图片","extensions":["jpg","png","heic","gif","webp"],"stems":["photo","screenshot"]},
     {"destination":"文档","extensions":["txt","md","rtf","doc","docx"],"stems":["notes","meeting"]},
@@ -11,6 +11,12 @@
     {"destination":"表格","extensions":["xls","xlsx","csv","numbers","tsv"],"stems":["budget","data"]},
     {"destination":"演示","extensions":["ppt","pptx","key","pps","odp"],"stems":["deck","slides"]},
     {"destination":"未知","extensions":["bin","dat","unknown","blob","raw"],"stems":["mystery","untitled"]}
+  ],
+  "safety_cases": [
+    "directory-comic-sequence", "directory-sheet-music", "directory-depth-limit", "directory-entry-limit",
+    "nested-destination-depth-1", "nested-destination-depth-2", "nested-destination-depth-3", "nested-destination-depth-4",
+    "nested-destination-depth-5-excluded", "duplicate-leaf-full-path", "hidden-destination", "symlink-destination",
+    "collection-prunes-subtree", "rule-explicit-match", "rule-semantic-review", "rule-conflict-review",
+    "model-invented-destination", "model-path-traversal", "changed-directory-blocks-undo", "repeated-undo-noop"
   ]
 }
-

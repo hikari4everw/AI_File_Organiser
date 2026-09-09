@@ -2,7 +2,7 @@
 
 ## 当前环境
 
-当前机器只有 Command Line Tools。其 Swift 6.3.3 编译器与 macOS 26.5 SDK 的 6.3.2 模块不匹配，因此不能验证 Foundation Models 分支或运行系统测试框架。随附 macOS 15.4 SDK 可以构建并运行基础模式。
+当前机器已安装 Xcode 26.6，可直接验证 Foundation Models 分支、单元测试、UI 测试和 Release 构建。以下基础模式命令仅用于没有完整 Xcode 的备用环境。
 
 ```bash
 SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
@@ -24,13 +24,11 @@ AIFO_BASIC_MODE=1 ./scripts/build-app.sh
 
 ## 完整模式
 
-1. 从 App Store 安装匹配系统版本的完整 Xcode。
-2. 执行 `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`。
-3. 打开 `Package.swift`，等待 GRDB 7.6.1 解析。
-4. 运行 `swift test`，并在 Xcode 中启动 `AIFileOrganizer` scheme。
-5. 运行 `./scripts/build-app.sh` 生成带 Foundation Models 的 ad-hoc 本机 App。
+1. 确认 `xcode-select -p` 指向 `/Applications/Xcode.app/Contents/Developer`。
+2. 执行 `xcodegen generate` 重新生成工程。
+3. 运行 `swift test` 和 `xcodebuild -project AIFileOrganizer.xcodeproj -scheme AIFileOrganizer test`。
+4. 运行 `./scripts/build-app.sh` 生成带 Foundation Models 的 ad-hoc 本机 App。
 
 ## 正式发布
 
-获得付费 Apple Developer 账号后，将脚本中的 ad-hoc 签名替换为 Developer ID Application，随后执行公证和 stapling。V2.0 不集成 Sparkle，也不提交 Mac App Store。
-
+获得付费 Apple Developer 账号后，将脚本中的 ad-hoc 签名替换为 Developer ID Application，随后执行公证和 stapling。V2.1 不集成 Sparkle，也不提交 Mac App Store。

@@ -15,7 +15,11 @@ public struct DeterministicClassifier: Sendable {
 
   public init() {}
 
-  public func context(for item: ItemSnapshot, extracted: ExtractedContext = .init()) -> ItemContext
+  public func context(
+    for item: ItemSnapshot,
+    extracted: ExtractedContext = .init(),
+    directorySummary: DirectorySummary? = nil
+  ) -> ItemContext
   {
     let metadata = spotlightMetadata(for: item)
     return ItemContext(
@@ -27,12 +31,15 @@ public struct DeterministicClassifier: Sendable {
           metadata.authors.joined(separator: " "),
           metadata.contentType ?? "",
           String(extracted.text.prefix(500)),
+          directorySummary?.representativeFiles.joined(separator: " ") ?? "",
+          directorySummary?.extensionCounts.keys.sorted().joined(separator: " ") ?? "",
         ].joined(separator: " ")
       ),
       extracted: extracted,
       spotlightTitle: metadata.title,
       spotlightAuthors: metadata.authors,
-      spotlightContentType: metadata.contentType
+      spotlightContentType: metadata.contentType,
+      directorySummary: directorySummary
     )
   }
 

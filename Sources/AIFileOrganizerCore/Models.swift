@@ -9,6 +9,10 @@ public enum ItemKind: String, Codable, Sendable {
   case file, directory, applicationBundle
 }
 
+public enum DestinationKind: String, Codable, Hashable, Sendable {
+  case category, collection, uncertain, excluded
+}
+
 public enum ProposalSource: String, Codable, Sendable {
   case deterministic, foundationModel, user
 }
@@ -34,7 +38,7 @@ public enum OperationKind: String, Codable, Sendable {
 }
 
 public enum OperationState: String, Codable, Sendable {
-  case pending, running, completed, failed, undone, blocked
+  case pending, running, completed, undoing, failed, undone, blocked, undoBlocked
 }
 
 public struct Workspace: Codable, Hashable, Identifiable, Sendable {
@@ -151,14 +155,53 @@ public struct ItemSnapshot: Codable, Hashable, Identifiable, Sendable {
   }
 }
 
+public enum ContentExtractionStatus: String, Codable, Hashable, Sendable {
+  case success, noText, unsupported, unreadable, cloudPlaceholder, cancelled, notNeeded
+}
+
 public struct ExtractedContext: Codable, Hashable, Sendable {
   public var text: String
   public var source: String
   public var wasTruncated: Bool
+  public var status: ContentExtractionStatus
 
-  public init(text: String = "", source: String = "none", wasTruncated: Bool = false) {
+  public init(
+    text: String = "",
+    source: String = "none",
+    wasTruncated: Bool = false,
+    status: ContentExtractionStatus = .notNeeded
+  ) {
     self.text = text
     self.source = source
+    self.wasTruncated = wasTruncated
+    self.status = status
+  }
+}
+
+public struct DirectorySummary: Codable, Hashable, Sendable {
+  public var inspectedCount: Int
+  public var fileCount: Int
+  public var directoryCount: Int
+  public var extensionCounts: [String: Int]
+  public var representativeFiles: [String]
+  public var hasSequentialNames: Bool
+  public var wasTruncated: Bool
+
+  public init(
+    inspectedCount: Int = 0,
+    fileCount: Int = 0,
+    directoryCount: Int = 0,
+    extensionCounts: [String: Int] = [:],
+    representativeFiles: [String] = [],
+    hasSequentialNames: Bool = false,
+    wasTruncated: Bool = false
+  ) {
+    self.inspectedCount = inspectedCount
+    self.fileCount = fileCount
+    self.directoryCount = directoryCount
+    self.extensionCounts = extensionCounts
+    self.representativeFiles = representativeFiles
+    self.hasSequentialNames = hasSequentialNames
     self.wasTruncated = wasTruncated
   }
 }
@@ -171,6 +214,8 @@ public struct ItemContext: Codable, Hashable, Identifiable, Sendable {
   public var spotlightTitle: String?
   public var spotlightAuthors: [String]
   public var spotlightContentType: String?
+  public var directorySummary: DirectorySummary?
+  public var ruleHints: [String]
 
   public init(
     snapshot: ItemSnapshot,
@@ -178,7 +223,9 @@ public struct ItemContext: Codable, Hashable, Identifiable, Sendable {
     extracted: ExtractedContext = .init(),
     spotlightTitle: String? = nil,
     spotlightAuthors: [String] = [],
-    spotlightContentType: String? = nil
+    spotlightContentType: String? = nil,
+    directorySummary: DirectorySummary? = nil,
+    ruleHints: [String] = []
   ) {
     self.snapshot = snapshot
     self.normalizedKeywords = normalizedKeywords
@@ -186,6 +233,8 @@ public struct ItemContext: Codable, Hashable, Identifiable, Sendable {
     self.spotlightTitle = spotlightTitle
     self.spotlightAuthors = spotlightAuthors
     self.spotlightContentType = spotlightContentType
+    self.directorySummary = directorySummary
+    self.ruleHints = ruleHints
   }
 }
 
@@ -196,6 +245,8 @@ public struct DestinationProfile: Codable, Hashable, Identifiable, Sendable {
   public var keywords: [String]
   public var sampleContentTypes: [String]
   public var isPinned: Bool
+  public var kind: DestinationKind
+  public var depth: Int
 
   public init(
     id: UUID = UUID(),
@@ -203,7 +254,9 @@ public struct DestinationProfile: Codable, Hashable, Identifiable, Sendable {
     displayName: String,
     keywords: [String] = [],
     sampleContentTypes: [String] = [],
-    isPinned: Bool = false
+    isPinned: Bool = false,
+    kind: DestinationKind = .category,
+    depth: Int = 1
   ) {
     self.id = id
     self.relativePath = relativePath
@@ -211,6 +264,8 @@ public struct DestinationProfile: Codable, Hashable, Identifiable, Sendable {
     self.keywords = keywords
     self.sampleContentTypes = sampleContentTypes
     self.isPinned = isPinned
+    self.kind = kind
+    self.depth = max(1, depth)
   }
 }
 
@@ -326,18 +381,38 @@ public struct FolderProposal: Codable, Hashable, Identifiable, Sendable {
 }
 
 public struct FileSnapshot: Codable, Hashable, Sendable {
+  public var formatVersion: Int
   public var resourceIdentifier: String?
   public var volumeIdentifier: String?
   public var size: Int64
   public var modificationDate: Date?
+  public var directoryManifest: DirectoryManifest?
 
   public init(
-    resourceIdentifier: String?, volumeIdentifier: String?, size: Int64, modificationDate: Date?
+    resourceIdentifier: String?, volumeIdentifier: String?, size: Int64, modificationDate: Date?,
+    directoryManifest: DirectoryManifest? = nil, formatVersion: Int = 2
   ) {
+    self.formatVersion = formatVersion
     self.resourceIdentifier = resourceIdentifier
     self.volumeIdentifier = volumeIdentifier
     self.size = size
     self.modificationDate = modificationDate
+    self.directoryManifest = directoryManifest
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case formatVersion, resourceIdentifier, volumeIdentifier, size, modificationDate
+    case directoryManifest
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    formatVersion = try values.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1
+    resourceIdentifier = try values.decodeIfPresent(String.self, forKey: .resourceIdentifier)
+    volumeIdentifier = try values.decodeIfPresent(String.self, forKey: .volumeIdentifier)
+    size = try values.decode(Int64.self, forKey: .size)
+    modificationDate = try values.decodeIfPresent(Date.self, forKey: .modificationDate)
+    directoryManifest = try values.decodeIfPresent(DirectoryManifest.self, forKey: .directoryManifest)
   }
 }
 
@@ -350,11 +425,16 @@ public struct PlannedOperation: Codable, Hashable, Identifiable, Sendable {
   public var itemID: UUID?
   public var preSnapshot: FileSnapshot?
   public var createdByApp: Bool
+  public var destinationID: UUID?
+  public var decisionFeatures: DecisionFeatures?
+  public var learningConfirmation: LearningConfirmation?
 
   public init(
     id: UUID = UUID(), sequence: Int, kind: OperationKind, sourcePath: String? = nil,
     destinationPath: String, itemID: UUID? = nil, preSnapshot: FileSnapshot? = nil,
-    createdByApp: Bool = false
+    createdByApp: Bool = false, destinationID: UUID? = nil,
+    decisionFeatures: DecisionFeatures? = nil,
+    learningConfirmation: LearningConfirmation? = nil
   ) {
     self.id = id
     self.sequence = sequence
@@ -364,6 +444,30 @@ public struct PlannedOperation: Codable, Hashable, Identifiable, Sendable {
     self.itemID = itemID
     self.preSnapshot = preSnapshot
     self.createdByApp = createdByApp
+    self.destinationID = destinationID
+    self.decisionFeatures = decisionFeatures
+    self.learningConfirmation = learningConfirmation
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, sequence, kind, sourcePath, destinationPath, itemID, preSnapshot, createdByApp
+    case destinationID, decisionFeatures, learningConfirmation
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decode(UUID.self, forKey: .id)
+    sequence = try values.decode(Int.self, forKey: .sequence)
+    kind = try values.decode(OperationKind.self, forKey: .kind)
+    sourcePath = try values.decodeIfPresent(String.self, forKey: .sourcePath)
+    destinationPath = try values.decode(String.self, forKey: .destinationPath)
+    itemID = try values.decodeIfPresent(UUID.self, forKey: .itemID)
+    preSnapshot = try values.decodeIfPresent(FileSnapshot.self, forKey: .preSnapshot)
+    createdByApp = try values.decodeIfPresent(Bool.self, forKey: .createdByApp) ?? false
+    destinationID = try values.decodeIfPresent(UUID.self, forKey: .destinationID)
+    decisionFeatures = try values.decodeIfPresent(DecisionFeatures.self, forKey: .decisionFeatures)
+    learningConfirmation = try values.decodeIfPresent(
+      LearningConfirmation.self, forKey: .learningConfirmation)
   }
 }
 
@@ -404,14 +508,36 @@ public struct ExecutionReceipt: Codable, Hashable, Identifiable, Sendable {
   public var planID: UUID
   public var completedAt: Date
   public var results: [OperationResult]
+  public var wasCancelled: Bool
+  public var isUndoReceipt: Bool
+  public var isFinal: Bool
 
   public init(
-    id: UUID = UUID(), planID: UUID, completedAt: Date = Date(), results: [OperationResult]
+    id: UUID = UUID(), planID: UUID, completedAt: Date = Date(), results: [OperationResult],
+    wasCancelled: Bool = false, isUndoReceipt: Bool = false, isFinal: Bool = true
   ) {
     self.id = id
     self.planID = planID
     self.completedAt = completedAt
     self.results = results
+    self.wasCancelled = wasCancelled
+    self.isUndoReceipt = isUndoReceipt
+    self.isFinal = isFinal
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, planID, completedAt, results, wasCancelled, isUndoReceipt, isFinal
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decode(UUID.self, forKey: .id)
+    planID = try values.decode(UUID.self, forKey: .planID)
+    completedAt = try values.decode(Date.self, forKey: .completedAt)
+    results = try values.decode([OperationResult].self, forKey: .results)
+    wasCancelled = try values.decodeIfPresent(Bool.self, forKey: .wasCancelled) ?? false
+    isUndoReceipt = try values.decodeIfPresent(Bool.self, forKey: .isUndoReceipt) ?? false
+    isFinal = try values.decodeIfPresent(Bool.self, forKey: .isFinal) ?? true
   }
 }
 

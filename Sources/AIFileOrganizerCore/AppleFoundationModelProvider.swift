@@ -79,6 +79,7 @@ import Foundation
           shallowTypes=\(item.snapshot.shallowExtensions.joined(separator: ","))
           extractedSource=\(item.extracted.source)
           extractedText=\(item.extracted.text.prefix(3000))
+          userRuleHints=\(item.ruleHints.joined(separator: " | "))
           """
         let response = try await session.respond(
           to: prompt,
