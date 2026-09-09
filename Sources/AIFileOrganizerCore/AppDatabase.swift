@@ -173,6 +173,16 @@ public final class AppDatabase: @unchecked Sendable {
         table.column("payload_json", .blob).notNull()
       }
     }
+    migrator.registerMigration("v2.1-active-workspace") { db in
+      try db.alter(table: "workspaces") { table in
+        table.add(column: "is_active", .boolean).notNull().defaults(to: false)
+      }
+      try db.execute(
+        sql: """
+          UPDATE workspaces SET is_active = 1
+          WHERE id = (SELECT id FROM workspaces ORDER BY created_at DESC LIMIT 1)
+          """)
+    }
     try migrator.migrate(queue)
   }
 
@@ -191,17 +201,19 @@ public final class AppDatabase: @unchecked Sendable {
   public func saveWorkspace(_ workspace: Workspace) throws {
     let payload = try encode(workspace)
     try queue.write { db in
+      try db.execute(sql: "UPDATE workspaces SET is_active = 0")
       try db.execute(
         sql: """
           INSERT INTO workspaces
           (id, inbox_path, library_path, inbox_bookmark, library_bookmark,
-           inbox_volume_id, library_volume_id, payload_json, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           inbox_volume_id, library_volume_id, payload_json, created_at, is_active)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
           ON CONFLICT(id) DO UPDATE SET
           inbox_path = excluded.inbox_path, library_path = excluded.library_path,
           inbox_bookmark = excluded.inbox_bookmark, library_bookmark = excluded.library_bookmark,
           inbox_volume_id = excluded.inbox_volume_id,
-          library_volume_id = excluded.library_volume_id, payload_json = excluded.payload_json
+          library_volume_id = excluded.library_volume_id, payload_json = excluded.payload_json,
+          is_active = 1
           """,
         arguments: [
           workspace.id.uuidString, workspace.inboxPath, workspace.libraryPath,
@@ -216,7 +228,8 @@ public final class AppDatabase: @unchecked Sendable {
     try queue.read { db in
       guard
         let data: Data = try Data.fetchOne(
-          db, sql: "SELECT payload_json FROM workspaces ORDER BY created_at DESC LIMIT 1"
+          db,
+          sql: "SELECT payload_json FROM workspaces WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1"
         )
       else { return nil }
       return try decode(Workspace.self, from: data)
@@ -227,6 +240,10 @@ public final class AppDatabase: @unchecked Sendable {
     try queue.write { db in
       try db.execute(sql: "DELETE FROM workspaces")
     }
+  }
+
+  public func deactivateWorkspaces() throws {
+    try queue.write { db in try db.execute(sql: "UPDATE workspaces SET is_active = 0") }
   }
 
   public func saveSession(_ session: OrganizationSession) throws {
@@ -352,7 +369,8 @@ public final class AppDatabase: @unchecked Sendable {
       try db.execute(
         sql: "UPDATE plans SET status = ?, receipt_json = ? WHERE id = ?",
         arguments: [
-          receipt.results.contains(where: { $0.state == .failed || $0.state == .blocked })
+          receipt.wasCancelled
+            || receipt.results.contains(where: { $0.state == .failed || $0.state == .blocked })
             ? "partial" : "completed",
           payload, receipt.planID.uuidString,
         ]
@@ -420,6 +438,41 @@ public final class AppDatabase: @unchecked Sendable {
     }
   }
 
+  public func saveRule(_ rule: OrganizationRule) throws {
+    let payload = try encode(rule)
+    try queue.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO organization_rules
+          (id, workspace_id, destination_id, is_enabled, payload_json)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET destination_id = excluded.destination_id,
+          is_enabled = excluded.is_enabled, payload_json = excluded.payload_json
+          """,
+        arguments: [
+          rule.id.uuidString, rule.workspaceID.uuidString, rule.destinationID.uuidString,
+          rule.isEnabled, payload,
+        ]
+      )
+    }
+  }
+
+  public func rules(workspaceID: UUID) throws -> [OrganizationRule] {
+    try queue.read { db in
+      try Data.fetchAll(
+        db,
+        sql: "SELECT payload_json FROM organization_rules WHERE workspace_id = ? ORDER BY rowid",
+        arguments: [workspaceID.uuidString]
+      ).map { try decode(OrganizationRule.self, from: $0) }
+    }
+  }
+
+  public func deleteRule(_ id: UUID) throws {
+    try queue.write { db in
+      try db.execute(sql: "DELETE FROM organization_rules WHERE id = ?", arguments: [id.uuidString])
+    }
+  }
+
   public func learningSamples(libraryID: UUID, activeOnly: Bool = false) throws
     -> [LearningSample]
   {
@@ -429,6 +482,27 @@ public final class AppDatabase: @unchecked Sendable {
         : "SELECT payload_json FROM learning_samples WHERE library_id = ? ORDER BY created_at"
       return try Data.fetchAll(db, sql: sql, arguments: [libraryID.uuidString]).map {
         try decode(LearningSample.self, from: $0)
+      }
+    }
+  }
+
+  public func replaceExistingLibrarySamples(libraryID: UUID, samples: [LearningSample]) throws {
+    let rows = try samples.map { ($0, try encode($0)) }
+    try queue.write { db in
+      try db.execute(
+        sql: "DELETE FROM learning_samples WHERE library_id = ? AND operation_id IS NULL",
+        arguments: [libraryID.uuidString])
+      for (sample, payload) in rows {
+        try db.execute(
+          sql: """
+            INSERT INTO learning_samples
+            (id, library_id, operation_id, item_identity, destination_id, is_active, payload_json, created_at)
+            VALUES (?, ?, NULL, ?, ?, 1, ?, ?)
+            """,
+          arguments: [
+            sample.id.uuidString, libraryID.uuidString, sample.itemIdentity,
+            sample.destinationID.uuidString, payload, sample.createdAt,
+          ])
       }
     }
   }

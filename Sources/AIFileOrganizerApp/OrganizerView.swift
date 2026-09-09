@@ -3,24 +3,35 @@ import SwiftUI
 
 struct OrganizerView: View {
   @ObservedObject var model: AppModel
+  @State private var page: OrganizerPage = .plan
   @State private var showExecutionConfirmation = false
   @State private var showNewFolder = false
   @State private var newFolderName = ""
 
   var body: some View {
-    VStack(spacing: 0) {
-      header
-      Divider()
-      if model.proposals.isEmpty {
-        emptyState
-      } else {
-        HSplitView {
-          proposalList.frame(minWidth: 620)
-          detailPanel.frame(minWidth: 280, idealWidth: 330, maxWidth: 420)
-        }
-        if !model.isWorking {
-          Divider()
-          executionBar
+    HSplitView {
+      sidebar.frame(minWidth: 180, idealWidth: 200, maxWidth: 230)
+      VStack(spacing: 0) {
+        header
+        Divider()
+        switch page {
+        case .plan:
+          if model.proposals.isEmpty {
+            emptyState
+          } else {
+            HSplitView {
+              proposalList.frame(minWidth: 560)
+              detailPanel.frame(minWidth: 280, idealWidth: 330, maxWidth: 420)
+            }
+            if !model.isWorking {
+              Divider()
+              executionBar
+            }
+          }
+        case .rules:
+          RulesView(model: model)
+        case .history:
+          HistoryView(model: model) { page = .plan }
         }
       }
     }
@@ -60,6 +71,39 @@ struct OrganizerView: View {
     }
   }
 
+  private var sidebar: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Label("AI File Organizer", systemImage: "sparkles.rectangle.stack.fill")
+        .font(.headline).padding(.horizontal, 12).padding(.bottom, 10)
+      ForEach(OrganizerPage.allCases) { value in
+        Button {
+          page = value
+        } label: {
+          HStack {
+            Label(value.title, systemImage: value.icon)
+            Spacer()
+            if value == .history, !model.historyEntries.isEmpty {
+              Text("\(model.historyEntries.count)")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+          }
+          .padding(.horizontal, 10).padding(.vertical, 8)
+          .background(page == value ? Color.accentColor.opacity(0.14) : .clear,
+            in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+      }
+      Spacer()
+      VStack(alignment: .leading, spacing: 5) {
+        Label("本地处理", systemImage: "lock.shield")
+        Text("已积累 \(model.learningSampleCount) 条有效偏好")
+      }
+      .font(.caption).foregroundStyle(.secondary).padding(12)
+    }
+    .padding(10)
+    .background(.regularMaterial)
+  }
+
   private var header: some View {
     HStack(spacing: 18) {
       VStack(alignment: .leading, spacing: 4) {
@@ -92,6 +136,9 @@ struct OrganizerView: View {
       if !model.isWorking && model.receipt == nil {
         Button("开始整理") { model.startOrganizing() }
           .buttonStyle(.borderedProminent).controlSize(.large)
+      } else if model.receipt != nil {
+        Button("撤销已载入的整理") { model.undo() }
+          .buttonStyle(.borderedProminent)
       }
       Spacer()
     }
@@ -114,7 +161,7 @@ struct OrganizerView: View {
         }
         ForEach(destinationGroups, id: \.destination.id) { group in
           ProposalSection(
-            title: group.destination.displayName,
+            title: group.destination.relativePath,
             subtitle: "可以整理 · \(group.proposals.count) 项",
             icon: "folder.fill",
             tint: .accentColor,
@@ -172,7 +219,7 @@ struct OrganizerView: View {
       Spacer()
       Menu("移动到…") {
         ForEach(model.destinations) { destination in
-          Button(destination.displayName) {
+          Button(destination.relativePath) {
             model.setDestination(destination.id, for: model.selectedItemIDs)
           }
         }
@@ -204,7 +251,7 @@ struct OrganizerView: View {
             Text(proposal.reason).foregroundStyle(.secondary)
             Menu("更改目标") {
               ForEach(model.destinations) { destination in
-                Button(destination.displayName) {
+                Button(destination.relativePath) {
                   model.setDestination(destination.id, for: [item.id])
                 }
               }
@@ -270,6 +317,17 @@ struct OrganizerView: View {
   }
 }
 
+private enum OrganizerPage: String, CaseIterable, Identifiable {
+  case plan, rules, history
+  var id: String { rawValue }
+  var title: String {
+    switch self { case .plan: "整理计划"; case .rules: "我的规则"; case .history: "历史与撤销" }
+  }
+  var icon: String {
+    switch self { case .plan: "rectangle.3.group"; case .rules: "text.badge.checkmark"; case .history: "clock.arrow.circlepath" }
+  }
+}
+
 private struct ProposalSection: View {
   let title: String
   let subtitle: String
@@ -327,10 +385,11 @@ private struct ProposalRow: View {
         .foregroundStyle(proposal.reviewDecision == .needsReview ? .orange : .secondary)
       VStack(alignment: .leading, spacing: 3) {
         Text(item.name).lineLimit(1)
-        Text(proposal.reason).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        Text("\(URL(fileURLWithPath: item.path).deletingLastPathComponent().lastPathComponent)  →  \(model.destinationName(proposal.destinationID))")
+          .font(.caption).foregroundStyle(.secondary).lineLimit(1)
       }
       Spacer()
-      Text(model.destinationName(proposal.destinationID)).font(.caption).foregroundStyle(.secondary)
+      Text(proposal.reason).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
     }
     .padding(.horizontal, 12).padding(.vertical, 9)
     .contentShape(Rectangle())

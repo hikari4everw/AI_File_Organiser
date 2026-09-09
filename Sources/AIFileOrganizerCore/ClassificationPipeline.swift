@@ -19,28 +19,33 @@ public struct ClassificationPipeline: Sendable {
   private let extractor: any ContentExtractor
   private let provider: any ClassificationProvider
   private let policy: any DecisionPolicy
+  private let directoryAnalyzer: DirectoryAnalyzer
 
   public init(
     classifier: DeterministicClassifier = .init(),
     extractor: any ContentExtractor = NativeContentExtractor(),
     provider: any ClassificationProvider = AppleFoundationModelProvider(),
-    policy: any DecisionPolicy = DefaultDecisionPolicy()
+    policy: any DecisionPolicy = DefaultDecisionPolicy(),
+    directoryAnalyzer: DirectoryAnalyzer = .init()
   ) {
     self.classifier = classifier
     self.extractor = extractor
     self.provider = provider
     self.policy = policy
+    self.directoryAnalyzer = directoryAnalyzer
   }
 
   public func run(
     sessionID: UUID,
     items: [ItemSnapshot],
-    destinations: [DestinationProfile]
+    destinations: [DestinationProfile],
+    rules: [OrganizationRule] = []
   ) async -> ClassificationPipelineResult {
     await run(
       sessionID: sessionID,
       items: items,
       destinations: destinations,
+      rules: rules,
       progress: { _ in }
     )
   }
@@ -49,11 +54,14 @@ public struct ClassificationPipeline: Sendable {
     sessionID: UUID,
     items: [ItemSnapshot],
     destinations: [DestinationProfile],
+    rules: [OrganizationRule] = [],
     progress: @escaping OrganizationProgressHandler
   ) async -> ClassificationPipelineResult {
     var final: [UUID: ClassificationProposal] = [:]
     var candidatesByItem: [UUID: [RankedCandidate]] = [:]
     var ambiguous: [ItemContext] = []
+    let validDestinationIDs = Set(destinations.filter { $0.kind == .category }.map(\.id))
+    let ruleEngine = RuleEngine()
 
     if !Task.isCancelled {
       await progress(
@@ -62,6 +70,28 @@ public struct ClassificationPipeline: Sendable {
     for (index, item) in items.enumerated() {
       if Task.isCancelled { break }
       let basic = classifier.context(for: item)
+      let basicRule = ruleEngine.evaluate(item: basic, rules: rules)
+      if case .matched(let ruleID, let destinationID) = basicRule,
+        validDestinationIDs.contains(destinationID)
+      {
+        final[item.id] = Self.ruleProposal(
+          sessionID: sessionID, itemID: item.id, ruleID: ruleID,
+          destinationID: destinationID)
+        if !Task.isCancelled {
+          await progress(.init(phase: .analyzing, completed: index + 1, total: items.count,
+            isCancellable: true))
+        }
+        continue
+      }
+      if case .conflict(let ruleIDs) = basicRule {
+        final[item.id] = Self.ruleConflictProposal(
+          sessionID: sessionID, itemID: item.id, ruleIDs: ruleIDs)
+        if !Task.isCancelled {
+          await progress(.init(phase: .analyzing, completed: index + 1, total: items.count,
+            isCancellable: true))
+        }
+        continue
+      }
       let candidates = classifier.rank(basic, destinations: destinations)
       candidatesByItem[item.id] = candidates
       if let proposal = classifier.proposal(
@@ -71,7 +101,43 @@ public struct ClassificationPipeline: Sendable {
         final[item.id] = proposal
       } else {
         let extracted = await extractor.extractContext(for: item)
-        let enriched = classifier.context(for: item, extracted: extracted)
+        let summary = item.kind == .directory
+          ? await directoryAnalyzer.analyze(URL(fileURLWithPath: item.path, isDirectory: true))
+          : nil
+        var enriched = classifier.context(
+          for: item,
+          extracted: extracted,
+          directorySummary: summary
+        )
+        let enrichedRule = ruleEngine.evaluate(item: enriched, rules: rules)
+        if case .matched(let ruleID, let destinationID) = enrichedRule,
+          validDestinationIDs.contains(destinationID)
+        {
+          final[item.id] = Self.ruleProposal(
+            sessionID: sessionID, itemID: item.id, ruleID: ruleID,
+            destinationID: destinationID)
+          if !Task.isCancelled {
+            await progress(.init(phase: .analyzing, completed: index + 1, total: items.count,
+              isCancellable: true))
+          }
+          continue
+        }
+        if case .conflict(let ruleIDs) = enrichedRule {
+          final[item.id] = Self.ruleConflictProposal(
+            sessionID: sessionID, itemID: item.id, ruleIDs: ruleIDs)
+          if !Task.isCancelled {
+            await progress(.init(phase: .analyzing, completed: index + 1, total: items.count,
+              isCancellable: true))
+          }
+          continue
+        }
+        if case .semanticCandidates(let ruleIDs) = enrichedRule {
+          let selected = rules.filter { ruleIDs.contains($0.id) }
+          enriched.ruleHints = selected.compactMap { rule in
+            guard let meaning = rule.condition.semanticDescription else { return nil }
+            return "\(meaning) => destinationID=\(rule.destinationID.uuidString)"
+          }
+        }
         let reranked = classifier.rank(enriched, destinations: destinations)
         candidatesByItem[item.id] = reranked
         ambiguous.append(enriched)
@@ -174,6 +240,28 @@ public struct ClassificationPipeline: Sendable {
     let folderProposals = Self.coalesceFolderProposals(sessionID: sessionID, proposals: proposals)
     return ClassificationPipelineResult(
       proposals: proposals, folderProposals: folderProposals, modelStatus: modelStatus)
+  }
+
+  private static func ruleProposal(
+    sessionID: UUID, itemID: UUID, ruleID: UUID, destinationID: UUID
+  ) -> ClassificationProposal {
+    ClassificationProposal(
+      sessionID: sessionID, itemID: itemID, action: .move,
+      destinationID: destinationID, source: .user, reviewDecision: .ready,
+      reason: "匹配用户规则", evidence: [
+        Evidence(kind: "rule", detail: ruleID.uuidString, weight: 1)
+      ])
+  }
+
+  private static func ruleConflictProposal(
+    sessionID: UUID, itemID: UUID, ruleIDs: [UUID]
+  ) -> ClassificationProposal {
+    ClassificationProposal(
+      sessionID: sessionID, itemID: itemID, action: .keep,
+      source: .user, reviewDecision: .needsReview,
+      reason: "同时匹配了多个目标不同的规则，请手动选择",
+      evidence: ruleIDs.map { Evidence(kind: "rule-conflict", detail: $0.uuidString, weight: 1) }
+    )
   }
 
   public static func coalesceFolderProposals(

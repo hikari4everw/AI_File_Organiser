@@ -33,7 +33,13 @@ public struct PlanBuilder: Sendable {
       for itemID in folder.relatedItemIDs {
         guard let item = itemsByID[itemID], !handledItems.contains(itemID) else { continue }
         operations.append(
-          try moveOperation(item: item, destinationDirectory: destination, sequence: sequence))
+          try moveOperation(
+            item: item,
+            destinationDirectory: destination,
+            sequence: sequence,
+            destinationID: DestinationIndexer().identifier(for: name),
+            confirmation: .userApproved
+          ))
         sequence += 1
         handledItems.insert(itemID)
       }
@@ -50,7 +56,14 @@ public struct PlanBuilder: Sendable {
       let directory = try PathSafety.safeDestination(
         library: library, relativePath: destination.relativePath)
       operations.append(
-        try moveOperation(item: item, destinationDirectory: directory, sequence: sequence))
+        try moveOperation(
+          item: item,
+          destinationDirectory: directory,
+          sequence: sequence,
+          destinationID: destinationID,
+          confirmation: proposal.source == .user || proposal.status == .approved
+            || proposal.status == .overridden ? .userApproved : .acceptedSuggestion
+        ))
       sequence += 1
       handledItems.insert(item.id)
     }
@@ -58,7 +71,13 @@ public struct PlanBuilder: Sendable {
     return OrganizationPlan(sessionID: sessionID, operations: operations)
   }
 
-  private func moveOperation(item: ItemSnapshot, destinationDirectory: URL, sequence: Int) throws
+  private func moveOperation(
+    item: ItemSnapshot,
+    destinationDirectory: URL,
+    sequence: Int,
+    destinationID: UUID? = nil,
+    confirmation: LearningConfirmation? = nil
+  ) throws
     -> PlannedOperation
   {
     let source = URL(fileURLWithPath: item.path)
@@ -69,7 +88,14 @@ public struct PlanBuilder: Sendable {
       sourcePath: source.path,
       destinationPath: destinationDirectory.appendingPathComponent(item.name).path,
       itemID: item.id,
-      preSnapshot: snapshot
+      preSnapshot: snapshot,
+      destinationID: destinationID,
+      decisionFeatures: DecisionFeatures(
+        itemKind: item.kind,
+        fileExtension: item.fileExtension,
+        keywords: KeywordTokenizer.tokens(from: item.name)
+      ),
+      learningConfirmation: confirmation
     )
   }
 }
@@ -78,13 +104,17 @@ extension FileSnapshot {
   public static func capture(_ url: URL) throws -> FileSnapshot {
     let values = try url.resourceValues(forKeys: [
       .fileResourceIdentifierKey, .volumeIdentifierKey, .fileSizeKey,
-      .contentModificationDateKey,
+      .contentModificationDateKey, .isDirectoryKey, .isPackageKey,
     ])
+    let manifest = values.isDirectory == true && values.isPackage != true
+      ? try DirectoryManifest.capture(url)
+      : nil
     return FileSnapshot(
       resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },
       volumeIdentifier: values.volumeIdentifier.map { String(describing: $0) },
       size: Int64(values.fileSize ?? 0),
-      modificationDate: values.contentModificationDate
+      modificationDate: values.contentModificationDate,
+      directoryManifest: manifest
     )
   }
 
@@ -101,10 +131,14 @@ extension FileSnapshot {
       return false
     }
     guard size == current.size else { return false }
+    let dateMatches: Bool
     switch (modificationDate, current.modificationDate) {
-    case (nil, nil): return true
-    case (let lhs?, let rhs?): return abs(lhs.timeIntervalSince(rhs)) < 0.01
-    default: return false
+    case (nil, nil): dateMatches = true
+    case (let lhs?, let rhs?): dateMatches = abs(lhs.timeIntervalSince(rhs)) < 0.01
+    default: dateMatches = false
     }
+    guard dateMatches else { return false }
+    if let directoryManifest { return directoryManifest.matches(url) }
+    return true
   }
 }

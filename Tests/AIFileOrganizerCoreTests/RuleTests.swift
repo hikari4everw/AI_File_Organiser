@@ -3,6 +3,17 @@ import Testing
 
 @testable import AIFileOrganizerCore
 
+private struct RuleEmptyExtractor: ContentExtractor {
+  func extractContext(for item: ItemSnapshot) async -> ExtractedContext { .init() }
+}
+
+private struct RuleUnavailableProvider: ClassificationProvider {
+  var availabilityDescription: String { "不可用" }
+  var isAvailable: Bool { false }
+  func classify(items: [ItemContext], destinations: [DestinationProfile]) async throws
+    -> [ModelProposal] { [] }
+}
+
 @Suite struct RuleTests {
   @Test func explicitRuleMatchesAllConditionGroups() {
     let workspaceID = UUID()
@@ -76,5 +87,62 @@ import Testing
 
     #expect(RuleEngine().evaluate(item: item, rules: [rule]) == .semanticCandidates([rule.id]))
   }
-}
 
+  @Test func rulesPersistAndCanBeDisabled() throws {
+    let database = try AppDatabase.inMemory()
+    let workspaceID = UUID()
+    let rule = OrganizationRule(
+      workspaceID: workspaceID,
+      originalText: "PDF 放到文档",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      destinationID: UUID()
+    )
+    try database.saveRule(rule)
+    let loaded = try #require(database.rules(workspaceID: workspaceID).first)
+    #expect(loaded.id == rule.id)
+    #expect(loaded.condition == rule.condition)
+    #expect(loaded.destinationID == rule.destinationID)
+
+    var disabled = rule
+    disabled.isEnabled = false
+    try database.saveRule(disabled)
+    #expect(try database.rules(workspaceID: workspaceID).first?.isEnabled == false)
+    try database.deleteRule(rule.id)
+    #expect(try database.rules(workspaceID: workspaceID).isEmpty)
+  }
+
+  @Test func matchingRuleOverridesHeuristicsAndConflictRequiresReview() async {
+    let session = UUID()
+    let workspaceID = UUID()
+    let pdf = ItemSnapshot(
+      sessionID: session, path: "/tmp/score.pdf", name: "score.pdf", kind: .file,
+      fileExtension: "pdf")
+    let scores = DestinationProfile(relativePath: "Music/Scores", displayName: "Scores")
+    let papers = DestinationProfile(relativePath: "Research/Papers", displayName: "Papers")
+    let scoreRule = OrganizationRule(
+      workspaceID: workspaceID,
+      originalText: "PDF 乐谱放 Scores",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      destinationID: scores.id
+    )
+    let pipeline = ClassificationPipeline(
+      extractor: RuleEmptyExtractor(), provider: RuleUnavailableProvider())
+    let matched = await pipeline.run(
+      sessionID: session, items: [pdf], destinations: [scores, papers], rules: [scoreRule])
+    #expect(matched.proposals.first?.destinationID == scores.id)
+    #expect(matched.proposals.first?.source == .user)
+    #expect(matched.proposals.first?.reviewDecision == .ready)
+
+    let conflictRule = OrganizationRule(
+      workspaceID: workspaceID,
+      originalText: "PDF 放 Papers",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      destinationID: papers.id
+    )
+    let conflicted = await pipeline.run(
+      sessionID: session, items: [pdf], destinations: [scores, papers],
+      rules: [scoreRule, conflictRule])
+    #expect(conflicted.proposals.first?.reviewDecision == .needsReview)
+    #expect(conflicted.proposals.first?.destinationID == nil)
+  }
+}

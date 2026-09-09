@@ -115,6 +115,7 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
   public func execute(_ plan: OrganizationPlan) -> AsyncThrowingStream<ExecutionEvent, Error> {
     AsyncThrowingStream { continuation in
       let task = Task.detached(priority: .userInitiated) { [workspace, database, fileManager] in
+        var results: [OperationResult] = []
         do {
           let executor = SafePlanExecutor(
             workspace: workspace, database: database, fileManager: fileManager)
@@ -124,7 +125,6 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
             throw OrganizerError.planBlocked(report.issues.map(\.message))
           }
           continuation.yield(.started(total: plan.operations.count))
-          var results: [OperationResult] = []
           let existingStates = try database.operationStates(planID: plan.id)
           for operation in plan.operations {
             try Task.checkCancellation()
@@ -132,6 +132,7 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
             if existingStates[operation.id] == .completed {
               let result = OperationResult(operationID: operation.id, state: .completed)
               results.append(result)
+              executor.recordLearningIfNeeded(operation, sessionID: plan.sessionID)
               continuation.yield(.operationFinished(result))
               continue
             }
@@ -139,6 +140,9 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
             let result = executor.apply(operation)
             try database.updateOperation(operation.id, state: result.state, error: result.error)
             results.append(result)
+            if result.state == .completed {
+              executor.recordLearningIfNeeded(operation, sessionID: plan.sessionID)
+            }
             continuation.yield(.operationFinished(result))
           }
           let receipt = ExecutionReceipt(planID: plan.id, results: results)
@@ -146,6 +150,9 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
           continuation.yield(.finished(receipt))
           continuation.finish()
         } catch is CancellationError {
+          let receipt = ExecutionReceipt(planID: plan.id, results: results, wasCancelled: true)
+          try? database.saveReceipt(receipt)
+          continuation.yield(.finished(receipt))
           continuation.finish(throwing: CancellationError())
         } catch {
           continuation.finish(throwing: error)
@@ -171,12 +178,21 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
             continuation.yield(.operationStarted(operation))
             let result = executor.revert(operation)
             try database.updateOperation(operation.id, state: result.state, error: result.error)
+            if result.state == .undone {
+              try? LearningService(database: database).retract(operationID: operation.id)
+            }
             results.append(result)
             continuation.yield(.operationFinished(result))
           }
           let undoReceipt = ExecutionReceipt(planID: plan.id, results: results)
+          try database.saveReceipt(undoReceipt)
           continuation.yield(.finished(undoReceipt))
           continuation.finish()
+        } catch is CancellationError {
+          let undoReceipt = ExecutionReceipt(planID: plan.id, results: results, wasCancelled: true)
+          try? database.saveReceipt(undoReceipt)
+          continuation.yield(.finished(undoReceipt))
+          continuation.finish(throwing: CancellationError())
         } catch {
           continuation.finish(throwing: error)
         }
@@ -219,6 +235,27 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
     } catch {
       return .init(operationID: operation.id, state: .failed, error: error.localizedDescription)
     }
+  }
+
+  private func recordLearningIfNeeded(_ operation: PlannedOperation, sessionID: UUID) {
+    guard operation.kind == .move,
+      let destinationID = operation.destinationID,
+      let features = operation.decisionFeatures,
+      let confirmation = operation.learningConfirmation
+    else { return }
+    let identity = operation.preSnapshot?.resourceIdentifier
+      ?? operation.itemID?.uuidString
+      ?? operation.sourcePath
+      ?? operation.id.uuidString
+    try? LearningService(database: database).recordSuccessfulOperation(
+      libraryID: workspace.id,
+      sessionID: sessionID,
+      operationID: operation.id,
+      itemIdentity: identity,
+      destinationID: destinationID,
+      features: features,
+      confirmation: confirmation
+    )
   }
 
   private func revert(_ operation: PlannedOperation) -> OperationResult {

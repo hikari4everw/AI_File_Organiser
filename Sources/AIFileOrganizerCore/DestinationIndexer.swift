@@ -27,7 +27,7 @@ public struct DestinationIndexer: Sendable {
     return discovered.map { url, relative, depth, kind in
       let samples = sampleTypes(in: url)
       return DestinationProfile(
-        id: stableUUID(for: relative),
+        id: identifier(for: relative),
         relativePath: relative,
         displayName: url.lastPathComponent,
         keywords: KeywordTokenizer.tokens(from: relative),
@@ -105,7 +105,7 @@ public struct DestinationIndexer: Sendable {
     return counts.sorted { $0.value > $1.value }.prefix(8).map(\.key)
   }
 
-  private func stableUUID(for value: String) -> UUID {
+  public func identifier(for value: String) -> UUID {
     var hash1: UInt64 = 0xcbf2_9ce4_8422_2325
     var hash2: UInt64 = 0x8422_2325_cbf2_9ce4
     for byte in value.utf8 {

@@ -21,6 +21,12 @@ final class AppModel: ObservableObject {
   @Published var progress: OrganizationProgress?
   @Published var currentPlan: OrganizationPlan?
   @Published var receipt: ExecutionReceipt?
+  @Published var rules: [OrganizationRule] = []
+  @Published var ruleDrafts: [RuleDraft] = []
+  @Published var historyEntries: [HistoryEntry] = []
+  @Published var learningSampleCount = 0
+  @Published var isInterpretingRule = false
+  @Published private(set) var decisionLocks: Set<UUID> = []
   @Published var lastError: String?
 
   private(set) var database: AppDatabase?
@@ -48,12 +54,16 @@ final class AppModel: ObservableObject {
       if let savedWorkspace = try database.latestWorkspace() {
         do {
           let access = try SecurityScopedBookmarks.resolve(savedWorkspace)
-          access.stop()
+          defer { access.stop() }
           workspace = savedWorkspace
+          loadWorkspaceArtifacts(savedWorkspace, database: database)
         } catch {
           workspace = nil
           lastError = error.localizedDescription
         }
+      }
+      if ProcessInfo.processInfo.arguments.contains("-ui-testing-workspace-demo") {
+        seedWorkspaceDemo(database: database)
       }
       if isUITesting {
         modelStatus = "本地 AI 状态将在整理时检查"
@@ -72,6 +82,46 @@ final class AppModel: ObservableObject {
       }.value
       self?.modelStatus = status
     }
+  }
+
+  private func seedWorkspaceDemo(database: AppDatabase) {
+    let workspace = Workspace(
+      inboxPath: "/tmp/Downloads",
+      libraryPath: "/tmp/Library",
+      inboxVolumeID: "ui-volume",
+      libraryVolumeID: "ui-volume"
+    )
+    let session = OrganizationSession(workspaceID: workspace.id, state: .review)
+    let destination = DestinationProfile(
+      relativePath: "创作/音乐/乐谱", displayName: "乐谱", keywords: ["乐谱"], depth: 3)
+    let item = ItemSnapshot(
+      sessionID: session.id,
+      path: "/tmp/Downloads/Moonlight Score.pdf",
+      name: "Moonlight Score.pdf",
+      kind: .file,
+      contentType: "com.adobe.pdf",
+      fileExtension: "pdf"
+    )
+    let proposal = ClassificationProposal(
+      sessionID: session.id,
+      itemID: item.id,
+      action: .move,
+      destinationID: destination.id,
+      source: .deterministic,
+      reviewDecision: .ready,
+      reason: "文件类型与目录用途一致"
+    )
+    try? database.saveWorkspace(workspace)
+    try? database.saveSession(session)
+    try? database.saveSnapshots([item])
+    try? database.saveProposals([proposal])
+    self.workspace = workspace
+    self.session = session
+    items = [item]
+    destinations = [destination]
+    proposals = [proposal]
+    statusMessage = "方案已生成，请确认移动位置"
+    modelStatus = "Apple 本地模型可用"
   }
 
   var readyProposals: [ClassificationProposal] {
@@ -100,6 +150,7 @@ final class AppModel: ObservableObject {
       let workspace = try SecurityScopedBookmarks.makeWorkspace(inbox: inbox, library: library)
       try database?.saveWorkspace(workspace)
       self.workspace = workspace
+      if let database { loadWorkspaceArtifacts(workspace, database: database) }
       lastError = nil
       statusMessage = "目录已授权，可以开始整理"
     } catch {
@@ -110,13 +161,18 @@ final class AppModel: ObservableObject {
   func forgetWorkspace() {
     guard !isWorking else { return }
     do {
-      try database?.clearWorkspaces()
+      try database?.deactivateWorkspaces()
     } catch {
       lastError = error.localizedDescription
       return
     }
     workspace = nil
     resetSession()
+    destinations = []
+    rules = []
+    ruleDrafts = []
+    historyEntries = []
+    learningSampleCount = 0
   }
 
   func startOrganizing() {
@@ -143,7 +199,14 @@ final class AppModel: ObservableObject {
       do {
         let access = try SecurityScopedBookmarks.resolve(workspace)
         defer { access.stop() }
-        self.destinations = try DestinationIndexer().index(workspace: workspace)
+        let indexed = try DestinationCatalogService().index(workspace: workspace, maxDepth: 4)
+        let learning = LearningService(database: database)
+        try learning.refreshExistingLibrarySamples(
+          libraryID: workspace.id,
+          root: URL(fileURLWithPath: workspace.libraryPath, isDirectory: true),
+          destinations: indexed)
+        self.destinations = try learning.enrich(destinations: indexed, libraryID: workspace.id)
+        self.rules = try database.rules(workspaceID: workspace.id)
         var scanned: [ItemSnapshot] = []
         for try await event in LocalInboxScanner().scan(workspace, sessionID: session.id) {
           try Task.checkCancellation()
@@ -161,6 +224,15 @@ final class AppModel: ObservableObject {
           case .discovered(let item):
             scanned.append(item)
             self.items.append(item)
+            self.proposals.append(
+              ClassificationProposal(
+                sessionID: session.id,
+                itemID: item.id,
+                action: .keep,
+                source: .deterministic,
+                reviewDecision: .needsReview,
+                reason: "正在分析…"
+              ))
             self.discoveredCount += 1
             self.updateScanProgress(total: self.progress?.total, sessionID: session.id)
           case .skipped(_, _):
@@ -186,14 +258,21 @@ final class AppModel: ObservableObject {
         let result = await ClassificationPipeline().run(
           sessionID: session.id,
           items: scanned,
-          destinations: self.destinations,
+          destinations: self.destinations.filter { $0.kind == .category },
+          rules: self.rules,
           progress: { [weak self] value in
             guard !Task.isCancelled else { return }
             await self?.setProgress(value, sessionID: session.id)
           }
         )
         try Task.checkCancellation()
-        self.proposals = result.proposals
+        let generated = Dictionary(uniqueKeysWithValues: result.proposals.map { ($0.itemID, $0) })
+        self.proposals = scanned.compactMap { item in
+          if self.decisionLocks.contains(item.id) {
+            return self.proposals.first { $0.itemID == item.id }
+          }
+          return generated[item.id]
+        }
         self.folderProposals = result.folderProposals
         self.modelStatus = result.modelStatus
         try database.saveProposals(result.proposals)
@@ -219,6 +298,7 @@ final class AppModel: ObservableObject {
   func setDestination(_ destinationID: UUID, for itemIDs: Set<UUID>) {
     guard let session else { return }
     currentPlan = nil
+    decisionLocks.formUnion(itemIDs)
     for index in proposals.indices where itemIDs.contains(proposals[index].itemID) {
       let old = proposals[index].destinationID
       proposals[index].destinationID = destinationID
@@ -245,6 +325,7 @@ final class AppModel: ObservableObject {
   func keep(_ itemIDs: Set<UUID>) {
     guard let session else { return }
     currentPlan = nil
+    decisionLocks.formUnion(itemIDs)
     for index in proposals.indices where itemIDs.contains(proposals[index].itemID) {
       let old = proposals[index].destinationID
       proposals[index].action = .keep
@@ -305,6 +386,7 @@ final class AppModel: ObservableObject {
   func createFolder(named rawName: String, for itemIDs: Set<UUID>) {
     guard let session, !itemIDs.isEmpty else { return }
     currentPlan = nil
+    decisionLocks.formUnion(itemIDs)
     do {
       let name = try PathSafety.validateFolderName(rawName)
       let key = PathSafety.normalizedFolderKey(name)
@@ -449,6 +531,8 @@ final class AppModel: ObservableObject {
           self.receipt?.results.contains { $0.state == .failed || $0.state == .blocked } ?? false
         self.updateSession(hasFailure ? .partial : .completed, finished: true)
         self.statusMessage = hasFailure ? "整理部分完成" : "整理完成"
+        self.refreshHistory()
+        self.refreshLearningCount()
       } catch is CancellationError {
         self.updateSession(.partial, finished: true)
         self.statusMessage = "已停止，已完成的项目保持不变"
@@ -499,7 +583,9 @@ final class AppModel: ObservableObject {
         }
         let blocked = finalReceipt?.results.filter { $0.state == .blocked }.count ?? 0
         self.statusMessage = blocked == 0 ? "本次整理已撤销" : "撤销完成，\(blocked) 项因状态变化被保留"
-        if blocked == 0 { self.receipt = nil }
+        self.receipt = blocked == 0 ? nil : finalReceipt
+        self.refreshHistory()
+        self.refreshLearningCount()
       } catch {
         if error is CancellationError {
           self.statusMessage = "已停止撤销，已完成的项目保持当前状态"
@@ -516,7 +602,66 @@ final class AppModel: ObservableObject {
 
   func destinationName(_ id: UUID?) -> String {
     guard let id else { return "未指定" }
-    return destinations.first(where: { $0.id == id })?.displayName ?? "未知目标"
+    return destinations.first(where: { $0.id == id })?.relativePath ?? "未知目标"
+  }
+
+  func interpretRule(_ text: String) {
+    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      !isInterpretingRule
+    else { return }
+    isInterpretingRule = true
+    Task { [weak self] in
+      guard let self else { return }
+      defer { self.isInterpretingRule = false }
+      do {
+        self.ruleDrafts = try await AppleRuleInterpreter().interpret(
+          text: text, destinations: self.destinations)
+      } catch {
+        self.lastError = error.localizedDescription
+      }
+    }
+  }
+
+  func saveRuleDraft(_ draft: RuleDraft) {
+    guard let workspace, let destinationID = draft.destinationID,
+      destinations.contains(where: { $0.id == destinationID }),
+      draft.condition.hasDeterministicConditions || draft.condition.semanticDescription != nil
+    else {
+      lastError = "请补全规则条件并选择有效目标"
+      return
+    }
+    let rule = OrganizationRule(
+      workspaceID: workspace.id,
+      originalText: draft.originalText,
+      condition: draft.condition,
+      destinationID: destinationID
+    )
+    do {
+      try database?.saveRule(rule)
+      rules.append(rule)
+      ruleDrafts.removeAll { $0.id == draft.id }
+      statusMessage = "规则已保存，将用于下一次整理"
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func toggleRule(_ rule: OrganizationRule) {
+    guard let index = rules.firstIndex(where: { $0.id == rule.id }) else { return }
+    rules[index].isEnabled.toggle()
+    do { try database?.saveRule(rules[index]) } catch { lastError = error.localizedDescription }
+  }
+
+  func deleteRule(_ rule: OrganizationRule) {
+    do {
+      try database?.deleteRule(rule.id)
+      rules.removeAll { $0.id == rule.id }
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func useHistoryEntry(_ entry: HistoryEntry) {
+    guard let receipt = entry.receipt, !isWorking else { return }
+    currentPlan = entry.plan
+    self.receipt = receipt
+    statusMessage = "已载入历史整理，可检查并撤销"
   }
 
   private func updateSession(_ state: SessionState, finished: Bool = false, error: String? = nil) {
@@ -537,12 +682,41 @@ final class AppModel: ObservableObject {
     folderProposals = []
     selectedItemIDs = []
     selectedItemID = nil
+    decisionLocks = []
     discoveredCount = 0
     skippedCount = 0
     progress = nil
     currentPlan = nil
     receipt = nil
     lastError = nil
+  }
+
+  private func loadWorkspaceArtifacts(_ workspace: Workspace, database: AppDatabase) {
+    do {
+      let indexed = try DestinationCatalogService().index(workspace: workspace, maxDepth: 4)
+      let learning = LearningService(database: database)
+      try learning.refreshExistingLibrarySamples(
+        libraryID: workspace.id,
+        root: URL(fileURLWithPath: workspace.libraryPath, isDirectory: true),
+        destinations: indexed)
+      destinations = try learning.enrich(destinations: indexed, libraryID: workspace.id)
+      rules = try database.rules(workspaceID: workspace.id)
+      historyEntries = try HistoryStore(database: database).entries(workspaceID: workspace.id)
+      learningSampleCount = try learning.activeSamples(libraryID: workspace.id)
+        .filter { $0.confirmation != .existingLibrary }.count
+    } catch { lastError = error.localizedDescription }
+  }
+
+  private func refreshHistory() {
+    guard let workspace, let database else { return }
+    historyEntries = (try? HistoryStore(database: database).entries(workspaceID: workspace.id)) ?? []
+  }
+
+  private func refreshLearningCount() {
+    guard let workspace, let database else { return }
+    learningSampleCount = (try? LearningService(database: database)
+      .activeSamples(libraryID: workspace.id)
+      .filter { $0.confirmation != .existingLibrary }.count) ?? 0
   }
 
   private func setProgress(_ value: OrganizationProgress, sessionID: UUID) {

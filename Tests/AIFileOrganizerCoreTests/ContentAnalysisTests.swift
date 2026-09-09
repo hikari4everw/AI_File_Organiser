@@ -1,0 +1,78 @@
+import AppKit
+import CoreGraphics
+import Foundation
+import Testing
+
+@testable import AIFileOrganizerCore
+
+@Suite struct ContentAnalysisTests {
+  @Test func extractsTextFromFirstThreePDFPagesOnly() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let pdf = root.appendingPathComponent("score.pdf")
+    try makePDF(pages: ["FIRST PAGE", "SECOND PAGE", "THIRD PAGE", "FOURTH PAGE"], at: pdf)
+    let item = ItemSnapshot(
+      sessionID: UUID(),
+      path: pdf.path,
+      name: pdf.lastPathComponent,
+      kind: .file,
+      contentType: "com.adobe.pdf",
+      fileExtension: "pdf"
+    )
+
+    let result = await NativeContentExtractor(maximumCharacters: 6_000).extractContext(for: item)
+
+    #expect(result.status == .success)
+    #expect(result.text.contains("FIRST PAGE"))
+    #expect(result.text.contains("THIRD PAGE"))
+    #expect(!result.text.contains("FOURTH PAGE"))
+    #expect(result.wasTruncated)
+  }
+
+  @Test func directoryAnalysisIsBoundedAndFindsSequentialImages() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let comic = root.appendingPathComponent("Comic", isDirectory: true)
+    let chapter = comic.appendingPathComponent("Chapter", isDirectory: true)
+    try FileManager.default.createDirectory(at: chapter, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    for index in 1...220 {
+      let name = String(format: "%03d.jpg", index)
+      try Data([0]).write(to: chapter.appendingPathComponent(name))
+    }
+
+    let summary = await DirectoryAnalyzer(
+      maximumDepth: 2,
+      maximumEntries: 200,
+      maximumRepresentativeFiles: 5
+    ).analyze(comic)
+
+    #expect(summary.inspectedCount == 200)
+    #expect(summary.wasTruncated)
+    #expect(summary.extensionCounts["jpg"] == 199)
+    #expect(summary.representativeFiles.count <= 5)
+    #expect(summary.hasSequentialNames)
+  }
+
+  private func makePDF(pages: [String], at url: URL) throws {
+    let data = NSMutableData()
+    guard let consumer = CGDataConsumer(data: data) else { throw CocoaError(.fileWriteUnknown) }
+    var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+    guard let context = CGContext(consumer: consumer, mediaBox: &box, nil) else {
+      throw CocoaError(.fileWriteUnknown)
+    }
+    for value in pages {
+      context.beginPDFPage(nil)
+      NSGraphicsContext.saveGraphicsState()
+      NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+      NSString(string: value).draw(
+        at: CGPoint(x: 72, y: 650),
+        withAttributes: [.font: NSFont.systemFont(ofSize: 18)]
+      )
+      NSGraphicsContext.restoreGraphicsState()
+      context.endPDFPage()
+    }
+    context.closePDF()
+    try (data as Data).write(to: url)
+  }
+}

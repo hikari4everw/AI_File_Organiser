@@ -27,6 +27,19 @@ import Testing
     #expect(try database.rowCount("sessions") == 1)
   }
 
+  @Test func deactivatingWorkspacePreservesItsHistory() throws {
+    let database = try AppDatabase.inMemory()
+    let workspace = Workspace(
+      inboxPath: "/tmp/inbox", libraryPath: "/tmp/library",
+      inboxVolumeID: "volume", libraryVolumeID: "volume")
+    try database.saveWorkspace(workspace)
+    try database.saveSession(OrganizationSession(workspaceID: workspace.id))
+    try database.deactivateWorkspaces()
+    #expect(try database.latestWorkspace() == nil)
+    #expect(try database.rowCount("workspaces") == 1)
+    #expect(try database.rowCount("sessions") == 1)
+  }
+
   @Test func reloadsSavedPlanAndItsPartialReceipt() throws {
     let database = try AppDatabase.inMemory()
     let workspaceID = UUID()

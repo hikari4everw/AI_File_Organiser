@@ -42,6 +42,13 @@ private actor ExecutionProgressRecorder {
     let unwrapped = try #require(receipt)
     for try await _ in executor.undo(plan: plan, receipt: unwrapped) {}
     #expect(FileManager.default.fileExists(atPath: source.path))
+    let storedUndo = try #require(try fixture.database.receipt(planID: plan.id))
+    #expect(storedUndo.results.allSatisfy { $0.state == .undone })
+    var secondUndoTotal: Int?
+    for try await event in executor.undo(plan: plan, receipt: storedUndo) {
+      if case .started(let total) = event { secondUndoTotal = total }
+    }
+    #expect(secondUndoTotal == 0)
   }
 
   @Test func preflightBlocksExistingDestination() async throws {
@@ -121,6 +128,73 @@ private actor ExecutionProgressRecorder {
     for try await _ in executor.undo(plan: plan, receipt: unwrapped) {}
     #expect(!FileManager.default.fileExists(atPath: created.path))
     #expect(FileManager.default.fileExists(atPath: source.path))
+  }
+
+  @Test func directorySnapshotDetectsChangedChildrenBeforeUndo() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appendingPathComponent("Comic", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data("page-one".utf8).write(to: folder.appendingPathComponent("01.txt"))
+    let snapshot = try FileSnapshot.capture(folder)
+
+    try Data("page-two".utf8).write(to: folder.appendingPathComponent("02.txt"))
+
+    #expect(!snapshot.matches(folder))
+  }
+
+  @Test func successfulMoveLearnsOnceAndUndoRetractsSample() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("score.pdf")
+    try Data("piano score".utf8).write(to: source)
+    let item = ItemSnapshot(
+      sessionID: fixture.sessionID,
+      path: source.path,
+      name: source.lastPathComponent,
+      kind: .file,
+      fileExtension: "pdf"
+    )
+    let destination = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let proposal = ClassificationProposal(
+      sessionID: fixture.sessionID,
+      itemID: item.id,
+      action: .move,
+      destinationID: destination.id,
+      source: .user,
+      reviewDecision: .ready,
+      status: .approved,
+      reason: "user"
+    )
+    let plan = try PlanBuilder().build(
+      sessionID: fixture.sessionID,
+      workspace: fixture.workspace,
+      items: [item],
+      destinations: [destination],
+      proposals: [proposal],
+      folderProposals: []
+    )
+    let executor = SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)
+    var receipt: ExecutionReceipt?
+    for try await event in executor.execute(plan) {
+      if case .finished(let value) = event { receipt = value }
+    }
+    let completedReceipt = try #require(receipt)
+    #expect(
+      try LearningService(database: fixture.database).activeSamples(libraryID: fixture.workspace.id)
+        .count == 1
+    )
+
+    for try await _ in executor.execute(plan) {}
+    #expect(
+      try LearningService(database: fixture.database).activeSamples(libraryID: fixture.workspace.id)
+        .count == 1
+    )
+    for try await _ in executor.undo(plan: plan, receipt: completedReceipt) {}
+    #expect(
+      try LearningService(database: fixture.database).activeSamples(libraryID: fixture.workspace.id)
+        .isEmpty
+    )
   }
 
   private func makeFixture() throws -> (

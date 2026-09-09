@@ -30,5 +30,22 @@
       )
       XCTAssertTrue(app.buttons["organization-progress-stop"].exists)
     }
+
+    @MainActor
+    func testDestinationBoardRulesAndHistoryNavigation() {
+      let app = XCUIApplication()
+      app.launchArguments = [
+        "-ui-testing-reset", "-ui-testing-workspace-demo", "-ApplePersistenceIgnoreState", "YES",
+      ]
+      app.launch()
+
+      XCTAssertTrue(app.buttons["整理计划"].waitForExistence(timeout: 5))
+      XCTAssertTrue(app.staticTexts["创作/音乐/乐谱"].exists)
+      XCTAssertTrue(app.staticTexts["Moonlight Score.pdf"].exists)
+      app.buttons["我的规则"].click()
+      XCTAssertTrue(app.staticTexts["用一句话描述你的整理习惯"].exists)
+      app.buttons["历史与撤销"].click()
+      XCTAssertTrue(app.staticTexts["历史与撤销"].exists)
+    }
   }
 #endif

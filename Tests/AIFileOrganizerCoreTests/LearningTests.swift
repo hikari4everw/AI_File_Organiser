@@ -59,5 +59,39 @@ import Testing
 
     #expect(try service.suggestRules(libraryID: libraryID).isEmpty)
   }
-}
 
+  @Test func existingLibraryFilesRefreshWithoutDuplicatesAndEnrichDestination() throws {
+    let database = try AppDatabase.inMemory()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let scores = root.appendingPathComponent("Music/Scores")
+    try FileManager.default.createDirectory(at: scores, withIntermediateDirectories: true)
+    try Data("notes".utf8).write(to: scores.appendingPathComponent("moonlight-piano-score.pdf"))
+    try Data("notes".utf8).write(to: scores.appendingPathComponent("bach-fugue.pdf"))
+    defer { try? FileManager.default.removeItem(at: root) }
+    let destination = DestinationProfile(
+      relativePath: "Music/Scores", displayName: "Scores", sampleContentTypes: [])
+    let service = LearningService(database: database)
+    let libraryID = UUID()
+
+    try service.refreshExistingLibrarySamples(
+      libraryID: libraryID, root: root, destinations: [destination])
+    try service.refreshExistingLibrarySamples(
+      libraryID: libraryID, root: root, destinations: [destination])
+
+    let samples = try service.activeSamples(libraryID: libraryID)
+    #expect(samples.count == 2)
+    #expect(samples.allSatisfy { $0.confirmation == .existingLibrary })
+    let enriched = try service.enrich(destinations: [destination], libraryID: libraryID)
+    #expect(enriched.first?.keywords.contains("piano") == true)
+    #expect(enriched.first?.sampleContentTypes.contains("com.adobe.pdf") == true)
+
+    let boundedLibraryID = UUID()
+    try service.refreshExistingLibrarySamples(
+      libraryID: boundedLibraryID,
+      root: root,
+      destinations: [destination],
+      maximumTotal: 1
+    )
+    #expect(try service.activeSamples(libraryID: boundedLibraryID).count == 1)
+  }
+}
