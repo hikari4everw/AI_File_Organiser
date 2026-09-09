@@ -5,4 +5,7 @@ DerivedData/
 dist/
 *.xcuserstate
 xcuserdata/
-
+.xcode-derived/
+.xcode-package-cache/
+.xcode-results/
+default.profraw

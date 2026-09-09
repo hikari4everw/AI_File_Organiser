@@ -1,0 +1,104 @@
+name: AIFileOrganizer
+
+options:
+  bundleIdPrefix: com.markco
+  deploymentTarget:
+    macOS: "26.0"
+  xcodeVersion: "26.0"
+
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift.git
+    exactVersion: 7.6.1
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+
+targets:
+  AIFileOrganizerCore:
+    type: framework
+    platform: macOS
+    sources:
+      - Sources/AIFileOrganizerCore
+    dependencies:
+      - package: GRDB
+        product: GRDB
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.markco.AIFileOrganizerCore
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+
+  AIFileOrganizer:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/AIFileOrganizerApp
+    dependencies:
+      - target: AIFileOrganizerCore
+    info:
+      path: Config/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: zh_CN
+        CFBundleShortVersionString: "2.0.0"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.productivity
+        NSHighResolutionCapable: true
+    entitlements:
+      path: Config/AIFileOrganizer.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-write: true
+        com.apple.security.files.bookmarks.app-scope: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.markco.AIFileOrganizer
+        PRODUCT_NAME: AI File Organizer
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+
+  AIFileOrganizerCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/AIFileOrganizerCoreTests
+    dependencies:
+      - target: AIFileOrganizerCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.markco.AIFileOrganizerCoreTests
+        GENERATE_INFOPLIST_FILE: YES
+
+  AIFileOrganizerUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - UITests
+    dependencies:
+      - target: AIFileOrganizer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.markco.AIFileOrganizerUITests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  AIFileOrganizer:
+    build:
+      targets:
+        AIFileOrganizer: all
+        AIFileOrganizerCore: all
+        AIFileOrganizerCoreTests: [test]
+        AIFileOrganizerUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: true
+      targets:
+        - name: AIFileOrganizerCoreTests
+        - name: AIFileOrganizerUITests
+    archive:
+      config: Release

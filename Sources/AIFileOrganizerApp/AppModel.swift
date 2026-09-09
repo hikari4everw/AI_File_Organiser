@@ -29,6 +29,9 @@ final class AppModel: ObservableObject {
     do {
       let database = try AppDatabase.applicationDatabase()
       self.database = database
+      if ProcessInfo.processInfo.arguments.contains("-ui-testing-reset") {
+        try database.clearWorkspaces()
+      }
       if let savedWorkspace = try database.latestWorkspace() {
         do {
           let access = try SecurityScopedBookmarks.resolve(savedWorkspace)
@@ -39,9 +42,18 @@ final class AppModel: ObservableObject {
           lastError = error.localizedDescription
         }
       }
-      modelStatus = AppleFoundationModelProvider().availabilityDescription
+      refreshModelStatus()
     } catch {
       lastError = "数据库初始化失败：\(error.localizedDescription)"
+    }
+  }
+
+  private func refreshModelStatus() {
+    Task { [weak self] in
+      let status = await Task.detached(priority: .utility) {
+        AppleFoundationModelProvider().availabilityDescription
+      }.value
+      self?.modelStatus = status
     }
   }
 

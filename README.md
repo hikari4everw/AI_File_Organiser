@@ -15,13 +15,15 @@
 
 ## 开发
 
-需要 macOS 26 SDK 与 Swift 6.2+。当前工程是 Swift Package，可由完整 Xcode 直接打开。
+需要 Xcode 26、macOS 26 SDK 与 Swift 6.2+。`AIFileOrganizer.xcodeproj` 包含 App、Core、单元测试和 UI 测试目标；`project.yml` 是可复现的工程定义。
 
 ```bash
 swift test
 swift run AIFileOrganizerChecks
 swift run AIFileOrganizer
 ./scripts/build-app.sh
+xcodegen generate
+xcodebuild -project AIFileOrganizer.xcodeproj -scheme AIFileOrganizer test
 ```
 
 命令行打包脚本生成 ad-hoc 签名的本机 `.app`。Developer ID 签名、公证和正式分发需要付费 Apple Developer 账号，当前不在完成条件内。
