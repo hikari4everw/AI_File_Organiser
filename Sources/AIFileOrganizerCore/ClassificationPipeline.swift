@@ -71,12 +71,21 @@ public struct ClassificationPipeline: Sendable {
       if Task.isCancelled { break }
       let basic = classifier.context(for: item)
       let basicRule = ruleEngine.evaluate(item: basic, rules: rules)
-      if case .matched(let ruleID, let destinationID) = basicRule,
+      if case .matchedMove(let ruleID, let destinationID) = basicRule,
         validDestinationIDs.contains(destinationID)
       {
         final[item.id] = Self.ruleProposal(
           sessionID: sessionID, itemID: item.id, ruleID: ruleID,
           destinationID: destinationID)
+        if !Task.isCancelled {
+          await progress(.init(phase: .analyzing, completed: index + 1, total: items.count,
+            isCancellable: true))
+        }
+        continue
+      }
+      if case .matchedKeep(let ruleID) = basicRule {
+        final[item.id] = Self.ruleKeepProposal(
+          sessionID: sessionID, itemID: item.id, ruleID: ruleID)
         if !Task.isCancelled {
           await progress(.init(phase: .analyzing, completed: index + 1, total: items.count,
             isCancellable: true))
@@ -110,12 +119,21 @@ public struct ClassificationPipeline: Sendable {
           directorySummary: summary
         )
         let enrichedRule = ruleEngine.evaluate(item: enriched, rules: rules)
-        if case .matched(let ruleID, let destinationID) = enrichedRule,
+        if case .matchedMove(let ruleID, let destinationID) = enrichedRule,
           validDestinationIDs.contains(destinationID)
         {
           final[item.id] = Self.ruleProposal(
             sessionID: sessionID, itemID: item.id, ruleID: ruleID,
             destinationID: destinationID)
+          if !Task.isCancelled {
+            await progress(.init(phase: .analyzing, completed: index + 1, total: items.count,
+              isCancellable: true))
+          }
+          continue
+        }
+        if case .matchedKeep(let ruleID) = enrichedRule {
+          final[item.id] = Self.ruleKeepProposal(
+            sessionID: sessionID, itemID: item.id, ruleID: ruleID)
           if !Task.isCancelled {
             await progress(.init(phase: .analyzing, completed: index + 1, total: items.count,
               isCancellable: true))
@@ -135,7 +153,13 @@ public struct ClassificationPipeline: Sendable {
           let selected = rules.filter { ruleIDs.contains($0.id) }
           enriched.ruleHints = selected.compactMap { rule in
             guard let meaning = rule.condition.semanticDescription else { return nil }
-            return "\(meaning) => destinationID=\(rule.destinationID.uuidString)"
+            switch rule.action {
+            case .move:
+              guard let destinationID = rule.destinationID else { return nil }
+              return "\(meaning) => action=move destinationID=\(destinationID.uuidString)"
+            case .keep:
+              return "\(meaning) => action=keep"
+            }
           }
         }
         let reranked = classifier.rank(enriched, destinations: destinations)
@@ -249,6 +273,17 @@ public struct ClassificationPipeline: Sendable {
       sessionID: sessionID, itemID: itemID, action: .move,
       destinationID: destinationID, source: .user, reviewDecision: .ready,
       reason: "匹配用户规则", evidence: [
+        Evidence(kind: "rule", detail: ruleID.uuidString, weight: 1)
+      ])
+  }
+
+  private static func ruleKeepProposal(
+    sessionID: UUID, itemID: UUID, ruleID: UUID
+  ) -> ClassificationProposal {
+    ClassificationProposal(
+      sessionID: sessionID, itemID: itemID, action: .keep,
+      source: .user, reviewDecision: .keep,
+      reason: "匹配用户保留规则", evidence: [
         Evidence(kind: "rule", detail: ruleID.uuidString, weight: 1)
       ])
   }

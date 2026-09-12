@@ -44,7 +44,7 @@ struct RulesView: View {
                 .labelsHidden()
               VStack(alignment: .leading, spacing: 4) {
                 Text(rule.originalText).fontWeight(.medium)
-                Text("→ \(model.destinationName(rule.destinationID)) · \(conditionSummary(rule.condition))")
+                Text("\(actionSummary(rule, model: model)) · \(conditionSummary(rule.condition))")
                   .font(.caption).foregroundStyle(.secondary)
               }
               Spacer()
@@ -69,10 +69,17 @@ private struct RuleDraftCard: View {
     VStack(alignment: .leading, spacing: 12) {
       Label("请确认规则草稿", systemImage: "wand.and.stars").font(.headline)
       TextField("原始描述", text: $draft.originalText).textFieldStyle(.roundedBorder)
-      Picker("目标目录", selection: $draft.destinationID) {
-        Text("请选择…").tag(UUID?.none)
-        ForEach(model.destinations.filter { $0.kind == .category }) { destination in
-          Text(destination.relativePath).tag(Optional(destination.id))
+      Picker("动作", selection: $draft.action) {
+        Text("移动到目录").tag(RuleAction.move)
+        Text("保留原处").tag(RuleAction.keep)
+      }
+      .pickerStyle(.segmented)
+      if draft.action == .move {
+        Picker("目标目录", selection: $draft.destinationID) {
+          Text("请选择…").tag(UUID?.none)
+          ForEach(model.destinations.filter { $0.kind == .category }) { destination in
+            Text(destination.relativePath).tag(Optional(destination.id))
+          }
         }
       }
       TextField("扩展名（逗号分隔）", text: Binding(
@@ -107,6 +114,13 @@ private struct RuleDraftCard: View {
   private func commaSet(_ text: String) -> Set<String> {
     Set(text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
       .filter { !$0.isEmpty })
+  }
+}
+
+@MainActor private func actionSummary(_ rule: OrganizationRule, model: AppModel) -> String {
+  switch rule.action {
+  case .move: "→ \(model.destinationName(rule.destinationID))"
+  case .keep: "→ 保留原处"
   }
 }
 

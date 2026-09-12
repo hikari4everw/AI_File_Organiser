@@ -217,6 +217,25 @@ public final class AppDatabase: @unchecked Sendable {
           WHERE id = (SELECT id FROM workspaces ORDER BY created_at DESC LIMIT 1)
           """)
     }
+    migrator.registerMigration("v2.2-rule-actions") { db in
+      try db.create(table: "organization_rules_v2") { table in
+        table.column("id", .text).primaryKey()
+        table.column("workspace_id", .text).notNull().indexed()
+        table.column("destination_id", .text)
+        table.column("action", .text).notNull().defaults(to: RuleAction.move.rawValue)
+        table.column("is_enabled", .boolean).notNull()
+        table.column("payload_json", .blob).notNull()
+      }
+      try db.execute(
+        sql: """
+          INSERT INTO organization_rules_v2
+          (id, workspace_id, destination_id, action, is_enabled, payload_json)
+          SELECT id, workspace_id, destination_id, 'move', is_enabled, payload_json
+          FROM organization_rules
+          """)
+      try db.drop(table: "organization_rules")
+      try db.rename(table: "organization_rules_v2", to: "organization_rules")
+    }
     try migrator.migrate(queue)
   }
 
@@ -539,14 +558,15 @@ public final class AppDatabase: @unchecked Sendable {
       try db.execute(
         sql: """
           INSERT INTO organization_rules
-          (id, workspace_id, destination_id, is_enabled, payload_json)
-          VALUES (?, ?, ?, ?, ?)
+          (id, workspace_id, destination_id, action, is_enabled, payload_json)
+          VALUES (?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET destination_id = excluded.destination_id,
-          is_enabled = excluded.is_enabled, payload_json = excluded.payload_json
+          action = excluded.action, is_enabled = excluded.is_enabled,
+          payload_json = excluded.payload_json
           """,
         arguments: [
-          rule.id.uuidString, rule.workspaceID.uuidString, rule.destinationID.uuidString,
-          rule.isEnabled, payload,
+          rule.id.uuidString, rule.workspaceID.uuidString, rule.destinationID?.uuidString,
+          rule.action.rawValue, rule.isEnabled, payload,
         ]
       )
     }

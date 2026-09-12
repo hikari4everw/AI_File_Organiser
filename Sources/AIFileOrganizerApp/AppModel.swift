@@ -678,16 +678,29 @@ final class AppModel: ObservableObject {
   }
 
   func saveRuleDraft(_ draft: RuleDraft) {
-    guard let workspace, let destinationID = draft.destinationID,
-      destinations.contains(where: { $0.id == destinationID }),
-      draft.condition.hasDeterministicConditions || draft.condition.semanticDescription != nil
+    guard let workspace else { return }
+    guard draft.condition.hasDeterministicConditions || draft.condition.semanticDescription != nil
     else {
-      lastError = "请补全规则条件并选择有效目标"
+      lastError = "请补全规则条件"
       return
+    }
+    let destinationID: UUID?
+    switch draft.action {
+    case .move:
+      guard let selectedID = draft.destinationID,
+        destinations.contains(where: { $0.id == selectedID })
+      else {
+        lastError = "请补全规则条件并选择有效目标"
+        return
+      }
+      destinationID = selectedID
+    case .keep:
+      destinationID = nil
     }
     let rule = OrganizationRule(
       workspaceID: workspace.id,
       originalText: draft.originalText,
+      action: draft.action,
       condition: draft.condition,
       destinationID: destinationID
     )

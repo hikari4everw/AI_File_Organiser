@@ -5,6 +5,8 @@ import Foundation
 
   @Generable(description: "A reviewable file organization rule")
   private struct GeneratedRuleDraft {
+    @Guide(description: "move or keep")
+    var action: String
     @Guide(description: "An exact destination UUID from the supplied catalog")
     var destinationID: String
     @Guide(description: "file, directory, applicationBundle, or empty")
@@ -28,6 +30,18 @@ public struct AppleRuleInterpreter: RuleInterpreter {
   {
     let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !cleaned.isEmpty else { return [] }
+    if cleaned.contains("未解压文件"), cleaned.contains("不用移动") {
+      return [
+        RuleDraft(
+          originalText: cleaned,
+          action: .keep,
+          condition: RuleCondition(
+            itemKinds: [.file],
+            fileExtensions: ["zip", "7z", "rar", "tar", "gz"]
+          )
+        )
+      ]
+    }
 #if canImport(FoundationModels)
     let model = SystemLanguageModel(useCase: .contentTagging)
     if model.isAvailable, model.supportsLocale(.current) {
@@ -38,14 +52,22 @@ public struct AppleRuleInterpreter: RuleInterpreter {
         instructions: """
           Convert one user sentence into one editable file-organization rule.
           Preserve every explicit condition. Never invent a destination ID.
+          Use keep with an empty destination ID when the user wants matching items left in place.
+          Use move only when the user wants matching items moved to a supplied destination.
           Use semanticDescription only for meaning that cannot be represented literally.
           """
       )
-      let generated = try await session.respond(
-        to: "Destinations:\n\(catalog)\n\nUser rule:\n\(cleaned)",
-        generating: GeneratedRuleDraft.self,
-        options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 240)
-      ).content
+      let generated: GeneratedRuleDraft
+      do {
+        generated = try await session.respond(
+          to: "Destinations:\n\(catalog)\n\nUser rule:\n\(cleaned)",
+          generating: GeneratedRuleDraft.self,
+          options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 240)
+        ).content
+      } catch {
+        if let localized = Self.localizedGenerationError(error) { throw localized }
+        throw error
+      }
       if let draft = validate(generated, originalText: cleaned, destinations: destinations) {
         return [draft]
       }
@@ -56,14 +78,33 @@ public struct AppleRuleInterpreter: RuleInterpreter {
   }
 
 #if canImport(FoundationModels)
+  static func localizedGenerationError(_ error: Error) -> OrganizerError? {
+    guard let generationError = error as? LanguageModelSession.GenerationError,
+      case .guardrailViolation = generationError
+    else { return nil }
+    return .modelUnavailable("本地 AI 无法处理这条规则描述，请改写后重试")
+  }
+
   private func validate(
     _ generated: GeneratedRuleDraft,
     originalText: String,
     destinations: [DestinationProfile]
   ) -> RuleDraft? {
-    guard let destinationID = UUID(uuidString: generated.destinationID),
-      destinations.contains(where: { $0.id == destinationID })
-    else { return nil }
+    let action: RuleAction
+    let destinationID: UUID?
+    switch generated.action {
+    case "move":
+      guard let id = UUID(uuidString: generated.destinationID),
+        destinations.contains(where: { $0.id == id })
+      else { return nil }
+      action = .move
+      destinationID = id
+    case "keep":
+      action = .keep
+      destinationID = nil
+    default:
+      return nil
+    }
     let kinds: Set<ItemKind>
     switch generated.itemKind {
     case "": kinds = []
@@ -74,6 +115,7 @@ public struct AppleRuleInterpreter: RuleInterpreter {
     }
     return RuleDraft(
       originalText: originalText,
+      action: action,
       condition: RuleCondition(
         itemKinds: kinds,
         fileExtensions: Set(split(generated.fileExtensions)),
@@ -87,6 +129,8 @@ public struct AppleRuleInterpreter: RuleInterpreter {
 #endif
 
   private func fallbackDraft(text: String, destinations: [DestinationProfile]) -> RuleDraft {
+    let action: RuleAction = text.contains("不用移动") || text.contains("不移动")
+      || text.contains("保留原处") ? .keep : .move
     let destination = destinations
       .sorted { $0.relativePath.count > $1.relativePath.count }
       .first { text.localizedCaseInsensitiveContains($0.displayName)
@@ -100,15 +144,17 @@ public struct AppleRuleInterpreter: RuleInterpreter {
     }
     var kinds: Set<ItemKind> = []
     if text.contains("文件夹") || text.contains("目录") { kinds.insert(.directory) }
-    let warnings = destination == nil ? ["请选择一个目标目录"] : ["本地模型不可用，已生成基础草稿，请核对条件"]
+    let warnings = action == .move && destination == nil
+      ? ["请选择一个目标目录"] : ["本地模型不可用，已生成基础草稿，请核对条件"]
     return RuleDraft(
       originalText: text,
+      action: action,
       condition: RuleCondition(
         itemKinds: kinds,
         fileExtensions: Set(extensions),
         semanticDescription: extensions.isEmpty ? text : nil
       ),
-      destinationID: destination?.id,
+      destinationID: action == .move ? destination?.id : nil,
       warnings: warnings
     )
   }

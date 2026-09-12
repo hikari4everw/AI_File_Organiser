@@ -3,6 +3,10 @@ import Testing
 
 @testable import AIFileOrganizerCore
 
+#if canImport(FoundationModels)
+  import FoundationModels
+#endif
+
 private struct RuleEmptyExtractor: ContentExtractor {
   func extractContext(for item: ItemSnapshot) async -> ExtractedContext { .init() }
 }
@@ -14,7 +18,178 @@ private struct RuleUnavailableProvider: ClassificationProvider {
     -> [ModelProposal] { [] }
 }
 
+private struct LegacyOrganizationRule: Encodable {
+  var id: UUID
+  var workspaceID: UUID
+  var originalText: String
+  var condition: RuleCondition
+  var destinationID: UUID
+  var isEnabled: Bool
+  var isDerived: Bool
+  var createdAt: Date
+}
+
 @Suite struct RuleTests {
+  @Test func unextractedArchiveKeepTextProducesDeterministicDraft() async throws {
+    let drafts = try await AppleRuleInterpreter().interpret(
+      text: "未解压文件不用移动",
+      destinations: []
+    )
+
+    let draft = try #require(drafts.first)
+    #expect(draft.action == .keep)
+    #expect(draft.destinationID == nil)
+    #expect(draft.condition.itemKinds == [.file])
+    #expect(draft.condition.fileExtensions == ["zip", "7z", "rar", "tar", "gz"])
+  }
+
+#if canImport(FoundationModels)
+  @Test func guardrailViolationUsesLocalizedRuleError() throws {
+    let error = LanguageModelSession.GenerationError.guardrailViolation(
+      .init(debugDescription: "Detected content likely to be unsafe"))
+
+    let localized = try #require(AppleRuleInterpreter.localizedGenerationError(error))
+
+    #expect(localized.localizedDescription == "本地 AI 无法处理这条规则描述，请改写后重试")
+  }
+#endif
+
+  @Test func keepRuleMatchesArchivesButNotOtherFiles() {
+    let rule = OrganizationRule(
+      workspaceID: UUID(),
+      originalText: "未解压文件不用移动",
+      action: .keep,
+      condition: RuleCondition(fileExtensions: ["zip", "7z", "rar", "tar", "gz"])
+    )
+    let archive = ItemContext(
+      snapshot: ItemSnapshot(
+        sessionID: UUID(), path: "/tmp/archive.zip", name: "archive.zip", kind: .file,
+        fileExtension: "zip"),
+      normalizedKeywords: []
+    )
+    let document = ItemContext(
+      snapshot: ItemSnapshot(
+        sessionID: UUID(), path: "/tmp/report.pdf", name: "report.pdf", kind: .file,
+        fileExtension: "pdf"),
+      normalizedKeywords: []
+    )
+
+    #expect(RuleEngine().evaluate(item: archive, rules: [rule]) == .matchedKeep(ruleID: rule.id))
+    #expect(RuleEngine().evaluate(item: document, rules: [rule]) == .none)
+  }
+
+  @Test func multipleKeepRulesDoNotConflict() {
+    let workspaceID = UUID()
+    let first = OrganizationRule(
+      workspaceID: workspaceID,
+      originalText: "压缩包保留原处",
+      action: .keep,
+      condition: RuleCondition(fileExtensions: ["zip"])
+    )
+    let second = OrganizationRule(
+      workspaceID: workspaceID,
+      originalText: "备份文件不移动",
+      action: .keep,
+      condition: RuleCondition(filenameKeywords: ["backup"])
+    )
+    let item = ItemContext(
+      snapshot: ItemSnapshot(
+        sessionID: UUID(), path: "/tmp/backup.zip", name: "backup.zip", kind: .file,
+        fileExtension: "zip"),
+      normalizedKeywords: []
+    )
+
+    #expect(
+      RuleEngine().evaluate(item: item, rules: [first, second]) == .matchedKeep(ruleID: first.id))
+  }
+
+  @Test func keepAndMoveRulesRequireReview() {
+    let workspaceID = UUID()
+    let keep = OrganizationRule(
+      workspaceID: workspaceID,
+      originalText: "压缩包不移动",
+      action: .keep,
+      condition: RuleCondition(fileExtensions: ["zip"])
+    )
+    let move = OrganizationRule(
+      workspaceID: workspaceID,
+      originalText: "ZIP 放归档",
+      condition: RuleCondition(fileExtensions: ["zip"]),
+      destinationID: UUID()
+    )
+    let item = ItemContext(
+      snapshot: ItemSnapshot(
+        sessionID: UUID(), path: "/tmp/archive.zip", name: "archive.zip", kind: .file,
+        fileExtension: "zip"),
+      normalizedKeywords: []
+    )
+
+    #expect(
+      RuleEngine().evaluate(item: item, rules: [keep, move])
+        == .conflict(ruleIDs: [keep.id, move.id]))
+  }
+
+  @Test func keepRuleProducesAutomaticKeepProposal() async {
+    let session = UUID()
+    let item = ItemSnapshot(
+      sessionID: session, path: "/tmp/archive.rar", name: "archive.rar", kind: .file,
+      fileExtension: "rar")
+    let rule = OrganizationRule(
+      workspaceID: UUID(),
+      originalText: "未解压文件不用移动",
+      action: .keep,
+      condition: RuleCondition(fileExtensions: ["rar"])
+    )
+
+    let result = await ClassificationPipeline(
+      extractor: RuleEmptyExtractor(), provider: RuleUnavailableProvider()
+    ).run(sessionID: session, items: [item], destinations: [], rules: [rule])
+
+    #expect(result.proposals.count == 1)
+    let proposal = result.proposals[0]
+    #expect(proposal.action == .keep)
+    #expect(proposal.destinationID == nil)
+    #expect(proposal.source == .user)
+    #expect(proposal.reviewDecision == .keep)
+  }
+
+  @Test func keepRulesPersistWithoutDestination() throws {
+    let database = try AppDatabase.inMemory()
+    let workspaceID = UUID()
+    let rule = OrganizationRule(
+      workspaceID: workspaceID,
+      originalText: "未解压文件不用移动",
+      action: .keep,
+      condition: RuleCondition(fileExtensions: ["zip"])
+    )
+
+    try database.saveRule(rule)
+
+    let loaded = try #require(database.rules(workspaceID: workspaceID).first)
+    #expect(loaded.action == .keep)
+    #expect(loaded.destinationID == nil)
+  }
+
+  @Test func legacyRulePayloadDefaultsToMove() throws {
+    let destinationID = UUID()
+    let legacy = LegacyOrganizationRule(
+      id: UUID(),
+      workspaceID: UUID(),
+      originalText: "PDF 放文档",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      destinationID: destinationID,
+      isEnabled: true,
+      isDerived: false,
+      createdAt: Date(timeIntervalSinceReferenceDate: 123)
+    )
+
+    let data = try JSONEncoder().encode(legacy)
+    let decoded = try JSONDecoder().decode(OrganizationRule.self, from: data)
+
+    #expect(decoded.action == .move)
+    #expect(decoded.destinationID == destinationID)
+  }
+
   @Test func explicitRuleMatchesAllConditionGroups() {
     let workspaceID = UUID()
     let destinationID = UUID()
@@ -43,7 +218,7 @@ private struct RuleUnavailableProvider: ClassificationProvider {
 
     let result = RuleEngine().evaluate(item: item, rules: [rule])
 
-    #expect(result == .matched(ruleID: rule.id, destinationID: destinationID))
+    #expect(result == .matchedMove(ruleID: rule.id, destinationID: destinationID))
   }
 
   @Test func rulesForDifferentDestinationsProduceReviewConflict() {

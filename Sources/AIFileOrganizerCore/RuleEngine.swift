@@ -1,22 +1,41 @@
 import Foundation
 
 public struct RuleEngine: Sendable {
+  private enum MatchTarget: Hashable {
+    case move(UUID)
+    case keep
+  }
+
   public init() {}
 
   public func evaluate(item: ItemContext, rules: [OrganizationRule]) -> RuleEvaluation {
-    var matches: [(UUID, UUID)] = []
+    var matches: [(ruleID: UUID, target: MatchTarget)] = []
     var semantic: [UUID] = []
     for rule in rules where rule.isEnabled {
       guard deterministicPartMatches(rule.condition, item: item) else { continue }
       if rule.condition.semanticDescription != nil {
         semantic.append(rule.id)
       } else if rule.condition.hasDeterministicConditions {
-        matches.append((rule.id, rule.destinationID))
+        switch rule.action {
+        case .move:
+          if let destinationID = rule.destinationID {
+            matches.append((rule.id, .move(destinationID)))
+          }
+        case .keep:
+          matches.append((rule.id, .keep))
+        }
       }
     }
-    let destinations = Set(matches.map(\.1))
-    if destinations.count > 1 { return .conflict(ruleIDs: matches.map(\.0)) }
-    if let first = matches.first { return .matched(ruleID: first.0, destinationID: first.1) }
+    let targets = Set(matches.map(\.target))
+    if targets.count > 1 { return .conflict(ruleIDs: matches.map(\.ruleID)) }
+    if let first = matches.first {
+      switch first.target {
+      case .move(let destinationID):
+        return .matchedMove(ruleID: first.ruleID, destinationID: destinationID)
+      case .keep:
+        return .matchedKeep(ruleID: first.ruleID)
+      }
+    }
     if !semantic.isEmpty { return .semanticCandidates(semantic) }
     return .none
   }

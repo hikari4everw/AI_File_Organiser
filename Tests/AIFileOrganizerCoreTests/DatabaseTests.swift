@@ -1,9 +1,76 @@
 import Foundation
+import GRDB
 import Testing
 
 @testable import AIFileOrganizerCore
 
 @Suite struct DatabaseTests {
+  @Test func migratesLegacyRulesToNullableDestinationsWithoutDataLoss() throws {
+    let databaseURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("\(UUID().uuidString).sqlite")
+    defer {
+      try? FileManager.default.removeItem(at: databaseURL)
+      try? FileManager.default.removeItem(atPath: databaseURL.path + "-shm")
+      try? FileManager.default.removeItem(atPath: databaseURL.path + "-wal")
+    }
+    let workspaceID = UUID()
+    let destinationID = UUID()
+    let rule = OrganizationRule(
+      workspaceID: workspaceID,
+      originalText: "PDF 放文档",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      destinationID: destinationID
+    )
+    let encoded = try JSONEncoder().encode(rule)
+    var legacyObject = try #require(
+      JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+    legacyObject.removeValue(forKey: "action")
+    let legacyPayload = try JSONSerialization.data(withJSONObject: legacyObject)
+    let legacyDatabase = try DatabaseQueue(path: databaseURL.path)
+    try legacyDatabase.write { db in
+      try db.execute(
+        sql: "CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
+      for identifier in ["v1-native", "v2.1-catalog-learning", "v2.1-active-workspace"] {
+        try db.execute(
+          sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)",
+          arguments: [identifier])
+      }
+      try db.execute(
+        sql: """
+          CREATE TABLE organization_rules (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            destination_id TEXT NOT NULL,
+            is_enabled BOOLEAN NOT NULL,
+            payload_json BLOB NOT NULL
+          )
+          """)
+      try db.execute(
+        sql: """
+          INSERT INTO organization_rules
+          (id, workspace_id, destination_id, is_enabled, payload_json)
+          VALUES (?, ?, ?, ?, ?)
+          """,
+        arguments: [
+          rule.id.uuidString, workspaceID.uuidString, destinationID.uuidString, true,
+          legacyPayload,
+        ])
+    }
+
+    let migratedDatabase = try AppDatabase(path: databaseURL.path)
+
+    let loaded = try #require(migratedDatabase.rules(workspaceID: workspaceID).first)
+    #expect(loaded.id == rule.id)
+    #expect(loaded.action == .move)
+    #expect(loaded.destinationID == destinationID)
+    let destinationColumnIsNullable = try migratedDatabase.queue.read { db in
+      try Row.fetchAll(db, sql: "PRAGMA table_info(organization_rules)")
+        .first { ($0["name"] as String) == "destination_id" }
+        .map { ($0["notnull"] as Int) == 0 }
+    }
+    #expect(destinationColumnIsNullable == true)
+  }
+
   @Test func createsExactlyTheV2EntityTables() throws {
     let database = try AppDatabase.inMemory()
     for table in [
