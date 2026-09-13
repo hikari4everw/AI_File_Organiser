@@ -71,6 +71,47 @@ import Testing
     #expect(try LearningService(database: database).activeSamples(libraryID: workspace.id).isEmpty)
   }
 
+  @Test func reconcilesRenameWithoutRepeatingItAndTracksNamingLearning() throws {
+    let database = try AppDatabase.inMemory()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let inbox = root.appendingPathComponent("Inbox")
+    let library = root.appendingPathComponent("Library")
+    try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let volume = try PathSafety.volumeIdentifier(for: inbox)
+    let workspace = Workspace(
+      inboxPath: inbox.path, libraryPath: library.path,
+      inboxVolumeID: volume, libraryVolumeID: volume)
+    try database.saveWorkspace(workspace)
+    let session = OrganizationSession(workspaceID: workspace.id)
+    try database.saveSession(session)
+    let source = inbox.appendingPathComponent("8f14e45f.pdf")
+    let destination = inbox.appendingPathComponent("Moonlight Sonata.pdf")
+    try Data("score".utf8).write(to: source)
+    let operation = PlannedOperation(
+      sequence: 0, kind: .rename, sourcePath: source.path,
+      destinationPath: destination.path, preSnapshot: try .capture(source),
+      namingDecisionFeatures: NamingDecisionFeatures(
+        itemKind: .file, fileExtension: "pdf", originalBaseName: "8f14e45f",
+        finalBaseName: "Moonlight Sonata", templatePattern: "{标题}"),
+      namingSampleSource: .acceptedSuggestion)
+    let plan = OrganizationPlan(sessionID: session.id, operations: [operation])
+    try database.savePlan(plan)
+    try database.updateOperation(operation.id, state: .running)
+    try FileManager.default.moveItem(at: source, to: destination)
+
+    let entry = try #require(HistoryStore(database: database).entries(workspaceID: workspace.id).first)
+    #expect(entry.receipt?.results.first?.state == .completed)
+    #expect(try NamingLearningService(database: database).activeSamples(workspaceID: workspace.id).count == 1)
+
+    try database.updateOperation(operation.id, state: .undoing)
+    try FileManager.default.moveItem(at: destination, to: source)
+    let undone = try #require(HistoryStore(database: database).entries(workspaceID: workspace.id).first)
+    #expect(undone.receipt?.results.first?.state == .undone)
+    #expect(try NamingLearningService(database: database).activeSamples(workspaceID: workspace.id).isEmpty)
+  }
+
   @Test func ambiguousUndoCrashRemainsRetryable() throws {
     let database = try AppDatabase.inMemory()
     let workspace = Workspace(

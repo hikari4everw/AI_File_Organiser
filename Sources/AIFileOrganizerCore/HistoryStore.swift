@@ -38,13 +38,17 @@ public struct HistoryStore: Sendable {
     for operation in plan.operations {
       guard let state = states[operation.id] else { continue }
       switch (state, operation.kind) {
-      case (.running, .move):
+      case (.running, .move), (.running, .rename):
         let sourceExists = operation.sourcePath.map(FileManager.default.fileExists(atPath:)) ?? false
         let destination = URL(fileURLWithPath: operation.destinationPath)
         if !sourceExists, operation.preSnapshot?.matches(destination) == true {
           let sample = learningSample(
             operation: operation, workspaceID: workspaceID, sessionID: plan.sessionID)
-          try database.finishOperation(operation.id, state: .completed, learningSample: sample)
+          let namingSample = namingSample(
+            operation: operation, workspaceID: workspaceID, sessionID: plan.sessionID)
+          try database.finishOperation(
+            operation.id, state: .completed, learningSample: sample,
+            namingSample: namingSample)
           states[operation.id] = .completed
         } else {
           try database.updateOperation(
@@ -80,7 +84,7 @@ public struct HistoryStore: Sendable {
           states[operation.id] = .blocked
         }
         changed = true
-      case (.undoing, .move):
+      case (.undoing, .move), (.undoing, .rename):
         guard let sourcePath = operation.sourcePath else {
           let result = OperationResult(
             operationID: operation.id, state: .blocked, error: "撤销缺少原始位置")
@@ -125,7 +129,7 @@ public struct HistoryStore: Sendable {
           states[operation.id] = .undone
         }
         changed = true
-      case (.completed, .move):
+      case (.completed, .move), (.completed, .rename):
         guard let sourcePath = operation.sourcePath else { continue }
         let source = URL(fileURLWithPath: sourcePath)
         if operation.preSnapshot?.matches(source) == true,
@@ -197,5 +201,26 @@ public struct HistoryStore: Sendable {
       features: features,
       confirmation: confirmation
     )
+  }
+
+  private func namingSample(
+    operation: PlannedOperation,
+    workspaceID: UUID,
+    sessionID: UUID
+  ) -> NamingSample? {
+    guard let features = operation.namingDecisionFeatures,
+      let source = operation.namingSampleSource
+    else { return nil }
+    return NamingSample(
+      workspaceID: workspaceID,
+      sessionID: sessionID,
+      operationID: operation.id,
+      itemIdentity: operation.preSnapshot?.resourceIdentifier
+        ?? operation.itemID?.uuidString
+        ?? operation.sourcePath
+        ?? operation.id.uuidString,
+      destinationID: operation.destinationID,
+      source: source,
+      features: features)
   }
 }

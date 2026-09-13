@@ -102,6 +102,46 @@ private actor ExecutionProgressRecorder {
       .activeSamples(workspaceID: fixture.workspace.id).isEmpty)
   }
 
+  @Test func movesAndRenamesComicDirectoryAsOneUnitWithoutChangingPages() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("Comic", isDirectory: true)
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try Data("page-1".utf8).write(to: source.appendingPathComponent("01.jpg"))
+    try Data("page-2".utf8).write(to: source.appendingPathComponent("02.jpg"))
+    let item = ItemSnapshot(
+      sessionID: fixture.sessionID, path: source.path, name: source.lastPathComponent,
+      kind: .directory, shallowExtensions: ["jpg"])
+    let destination = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let move = ClassificationProposal(
+      sessionID: fixture.sessionID, itemID: item.id, action: .move,
+      destinationID: destination.id, source: .user, reviewDecision: .ready,
+      status: .approved, reason: "user")
+    let rename = RenameProposal(
+      sessionID: fixture.sessionID, itemID: item.id, originalName: item.name,
+      suggestedBaseName: "月光漫画", source: .user, disposition: .edited, reason: "user")
+    let plan = try PlanBuilder().build(
+      sessionID: fixture.sessionID, workspace: fixture.workspace, items: [item],
+      destinations: [destination], proposals: [move], folderProposals: [],
+      renameProposals: [rename])
+    #expect(plan.operations.count == 1)
+    #expect(plan.operations[0].kind == .move)
+    let executor = SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)
+    var receipt: ExecutionReceipt?
+    for try await event in executor.execute(plan) {
+      if case .finished(let value) = event { receipt = value }
+    }
+
+    let moved = fixture.docs.appendingPathComponent("月光漫画", isDirectory: true)
+    #expect(FileManager.default.fileExists(atPath: moved.appendingPathComponent("01.jpg").path))
+    #expect(FileManager.default.fileExists(atPath: moved.appendingPathComponent("02.jpg").path))
+    #expect(!FileManager.default.fileExists(atPath: source.path))
+
+    for try await _ in executor.undo(plan: plan, receipt: try #require(receipt)) {}
+    #expect(FileManager.default.fileExists(atPath: source.appendingPathComponent("01.jpg").path))
+    #expect(FileManager.default.fileExists(atPath: source.appendingPathComponent("02.jpg").path))
+  }
+
   @Test func renamePreflightBlocksCaseInsensitiveSiblingCollision() async throws {
     let fixture = try makeFixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
