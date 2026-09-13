@@ -114,6 +114,7 @@ public struct FilenameSuggestionPipeline: Sendable {
             source: request.ruleID == nil ? .foundationModel : .namingRule,
             disposition: request.ruleID == nil ? .pending : .selectedByRule,
             ruleID: request.ruleID,
+            templatePattern: request.template?.pattern,
             reason: String(output.reason.prefix(240))
           )
         }

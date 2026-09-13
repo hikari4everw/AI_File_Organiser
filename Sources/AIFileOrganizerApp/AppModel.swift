@@ -11,6 +11,7 @@ final class AppModel: ObservableObject {
   @Published var destinations: [DestinationProfile] = []
   @Published var proposals: [ClassificationProposal] = []
   @Published var folderProposals: [FolderProposal] = []
+  @Published var renameProposals: [RenameProposal] = []
   @Published var selectedItemIDs: Set<UUID> = []
   @Published var selectedItemID: UUID?
   @Published var statusMessage = ""
@@ -23,6 +24,9 @@ final class AppModel: ObservableObject {
   @Published var receipt: ExecutionReceipt?
   @Published var rules: [OrganizationRule] = []
   @Published var ruleDrafts: [RuleDraft] = []
+  @Published var namingRules: [NamingRule] = []
+  @Published var namingRuleDrafts: [NamingRuleDraft] = []
+  @Published var namingRuleSuggestions: [NamingRuleSuggestion] = []
   @Published var historyEntries: [HistoryEntry] = []
   @Published var learningSampleCount = 0
   @Published var isInterpretingRule = false
@@ -113,15 +117,26 @@ final class AppModel: ObservableObject {
       reviewDecision: .ready,
       reason: "文件类型与目录用途一致"
     )
+    let rename = RenameProposal(
+      sessionID: session.id,
+      itemID: item.id,
+      originalName: item.name,
+      suggestedBaseName: "Moonlight Sonata",
+      source: .foundationModel,
+      reason: "从 PDF 标题提取"
+    )
     try? database.saveWorkspace(workspace)
     try? database.saveSession(session)
     try? database.saveSnapshots([item])
     try? database.saveProposals([proposal])
+    try? database.saveRenameProposals([rename])
     self.workspace = workspace
     self.session = session
     items = [item]
     destinations = [destination]
     proposals = [proposal]
+    renameProposals = [rename]
+    selectedItemID = item.id
     statusMessage = "方案已生成，请确认移动位置"
     modelStatus = "Apple 本地模型可用"
   }
@@ -140,9 +155,22 @@ final class AppModel: ObservableObject {
 
   var pendingFolderCount: Int { folderProposals.filter { $0.status == .pending }.count }
 
+  var selectedRenameProposals: [RenameProposal] {
+    renameProposals.filter { $0.selectedBaseName != nil }
+  }
+
+  var pendingRenameCount: Int {
+    renameProposals.filter { $0.disposition == .pending }.count
+  }
+
+  var blockedRenameCount: Int {
+    renameProposals.filter { $0.disposition == .blocked }.count
+  }
+
   var canExecute: Bool {
     !isWorking && receipt == nil && workspace != nil
-      && (!readyProposals.isEmpty || folderProposals.contains { $0.status == .approved })
+      && (!readyProposals.isEmpty || folderProposals.contains { $0.status == .approved }
+        || !selectedRenameProposals.isEmpty)
   }
 
   var canCancel: Bool { isWorking && progress?.isCancellable == true }
@@ -173,6 +201,9 @@ final class AppModel: ObservableObject {
     destinations = []
     rules = []
     ruleDrafts = []
+    namingRules = []
+    namingRuleDrafts = []
+    namingRuleSuggestions = []
     historyEntries = []
     learningSampleCount = 0
   }
@@ -209,6 +240,12 @@ final class AppModel: ObservableObject {
           destinations: indexed)
         self.destinations = try learning.enrich(destinations: indexed, libraryID: workspace.id)
         self.rules = try database.rules(workspaceID: workspace.id)
+        let namingLearning = NamingLearningService(database: database)
+        try namingLearning.refreshExistingLibrarySamples(
+          workspaceID: workspace.id,
+          root: URL(fileURLWithPath: workspace.libraryPath, isDirectory: true),
+          destinations: self.destinations)
+        self.namingRules = try database.namingRules(workspaceID: workspace.id)
         var scanned: [ItemSnapshot] = []
         for try await event in LocalInboxScanner().scan(workspace, sessionID: session.id) {
           try Task.checkCancellation()
@@ -280,9 +317,31 @@ final class AppModel: ObservableObject {
           filtered.relatedItemIDs.removeAll { self.decisionLocks.contains($0) }
           return filtered.relatedItemIDs.isEmpty ? nil : filtered
         }
+        let destinationByItem = Dictionary(uniqueKeysWithValues: result.proposals.compactMap {
+          proposal in proposal.destinationID.map { (proposal.itemID, $0) }
+        })
+        var styleExamples: [UUID: [String]] = [:]
+        for destination in self.destinations {
+          styleExamples[destination.id] = try namingLearning.styleExamples(
+            destinationID: destination.id)
+        }
+        let namingResult = await FilenameSuggestionPipeline().run(
+          sessionID: session.id,
+          items: scanned,
+          contextsByItem: result.contextsByItem,
+          namingRules: self.namingRules,
+          styleExamplesByDestination: styleExamples,
+          destinationByItem: destinationByItem,
+          progress: { [weak self] value in
+            guard !Task.isCancelled else { return }
+            await self?.setProgress(value, sessionID: session.id)
+          })
+        try Task.checkCancellation()
+        self.renameProposals = namingResult.proposals
         self.modelStatus = result.modelStatus
         try database.saveProposals(self.proposals)
         try database.saveFolderProposals(self.folderProposals)
+        try database.saveRenameProposals(self.renameProposals)
         self.updateSession(.review)
         self.statusMessage = scanned.isEmpty ? "收件箱已经很干净" : "方案已生成，请处理需要确认的项目"
       } catch is CancellationError {
@@ -470,6 +529,7 @@ final class AppModel: ObservableObject {
       let planDestinations = destinations
       let planProposals = proposals
       let planFolderProposals = folderProposals
+      let planRenameProposals = renameProposals
       let preparation = Task.detached(priority: .userInitiated) {
         try Task.checkCancellation()
         return try PlanBuilder().build(
@@ -478,13 +538,14 @@ final class AppModel: ObservableObject {
           items: planItems,
           destinations: planDestinations,
           proposals: planProposals,
-          folderProposals: planFolderProposals
+          folderProposals: planFolderProposals,
+          renameProposals: planRenameProposals
         )
       }
       planPreparationTask = preparation
       let plan = try await preparation.value
       guard !plan.operations.isEmpty else {
-        lastError = "当前没有可执行的移动"
+        lastError = "当前没有可执行的移动或改名"
         return false
       }
       progress = OrganizationProgress(
@@ -573,10 +634,12 @@ final class AppModel: ObservableObject {
           : (hasFailure ? "整理部分完成" : "整理完成")
         self.refreshHistory()
         self.refreshLearningCount()
+        self.refreshNamingLearning()
       } catch is CancellationError {
         self.receipt = try? database.receipt(planID: plan.id)
         self.refreshHistory()
         self.refreshLearningCount()
+        self.refreshNamingLearning()
         self.updateSession(.partial, finished: true)
         self.statusMessage = "已停止，已完成的项目保持不变"
       } catch {
@@ -638,17 +701,124 @@ final class AppModel: ObservableObject {
         }
         self.refreshHistory()
         self.refreshLearningCount()
+        self.refreshNamingLearning()
       } catch {
         if error is CancellationError {
           self.receipt = try? database.receipt(planID: plan.id)
           self.refreshHistory()
           self.refreshLearningCount()
+          self.refreshNamingLearning()
           self.statusMessage = "已停止撤销，已完成的项目保持当前状态"
         } else {
           self.lastError = error.localizedDescription
         }
       }
     }
+  }
+
+  func requestFilenameSuggestion(for itemID: UUID) {
+    guard let workspace, let session, let database,
+      let item = items.first(where: { $0.id == itemID }), item.kind != .applicationBundle,
+      !isWorking
+    else { return }
+    isWorking = true
+    progress = OrganizationProgress(
+      phase: .analyzing, total: 1, isCancellable: true)
+    runningTask = Task { [weak self] in
+      guard let self else { return }
+      defer {
+        self.progress = nil
+        self.isWorking = false
+        self.runningTask = nil
+      }
+      do {
+        let access = try SecurityScopedBookmarks.resolve(workspace)
+        defer { access.stop() }
+        let result = await FilenameSuggestionPipeline().run(
+          sessionID: session.id,
+          items: [item],
+          namingRules: self.namingRules,
+          requestedItemIDs: [itemID],
+          progress: { [weak self] value in
+            await self?.setProgress(value, sessionID: session.id)
+          })
+        try Task.checkCancellation()
+        guard let proposal = result.proposals.first else {
+          throw OrganizerError.modelUnavailable(result.modelStatus)
+        }
+        self.renameProposals.removeAll { $0.itemID == itemID }
+        self.renameProposals.append(proposal)
+        try database.saveRenameProposals(self.renameProposals)
+        self.currentPlan = nil
+        self.statusMessage = "已生成文件名建议，请确认"
+      } catch is CancellationError {
+        self.statusMessage = "已取消文件名分析"
+      } catch {
+        self.lastError = error.localizedDescription
+      }
+    }
+  }
+
+  func acceptRename(_ proposalID: UUID) {
+    guard let index = renameProposals.firstIndex(where: { $0.id == proposalID }) else { return }
+    renameProposals[index].disposition = .approved
+    persistRenameReview(itemID: renameProposals[index].itemID, action: "approve_rename")
+  }
+
+  func rejectRename(_ proposalID: UUID) {
+    guard let index = renameProposals.firstIndex(where: { $0.id == proposalID }) else { return }
+    renameProposals[index].disposition = .rejected
+    renameProposals[index].editedBaseName = nil
+    persistRenameReview(itemID: renameProposals[index].itemID, action: "reject_rename")
+  }
+
+  func updateRename(_ proposalID: UUID, baseName: String) {
+    guard let index = renameProposals.firstIndex(where: { $0.id == proposalID }),
+      let item = items.first(where: { $0.id == renameProposals[index].itemID })
+    else { return }
+    do {
+      _ = try FilenameValidator().validatedFullName(baseName: baseName, item: item)
+      renameProposals[index].editedBaseName = baseName.trimmingCharacters(
+        in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
+      renameProposals[index].source = .user
+      renameProposals[index].disposition = .edited
+      renameProposals[index].missingFields = []
+      renameProposals[index].reason = "由你修改文件名"
+      persistRenameReview(itemID: item.id, action: "edit_rename")
+    } catch {
+      lastError = error.localizedDescription
+    }
+  }
+
+  func rejectRenames(for itemIDs: Set<UUID>) {
+    for proposal in renameProposals where itemIDs.contains(proposal.itemID) {
+      rejectRename(proposal.id)
+    }
+  }
+
+  func renameProposal(for itemID: UUID) -> RenameProposal? {
+    renameProposals.first { $0.itemID == itemID }
+  }
+
+  func proposedFullName(for item: ItemSnapshot) -> String? {
+    guard let proposal = renameProposal(for: item.id) else { return nil }
+    let baseName = proposal.editedBaseName ?? proposal.suggestedBaseName
+    return try? FilenameValidator().validatedFullName(baseName: baseName, item: item)
+  }
+
+  private func persistRenameReview(itemID: UUID, action: String) {
+    currentPlan = nil
+    do {
+      try database?.saveRenameProposals(renameProposals)
+      if let session {
+        try database?.saveDecision(DecisionRecord(
+          sessionID: session.id,
+          itemID: itemID,
+          originalDestinationID: nil,
+          finalDestinationID: nil,
+          action: action))
+      }
+    } catch { lastError = error.localizedDescription }
   }
 
   func item(for proposal: ClassificationProposal) -> ItemSnapshot? {
@@ -669,8 +839,12 @@ final class AppModel: ObservableObject {
       guard let self else { return }
       defer { self.isInterpretingRule = false }
       do {
-        self.ruleDrafts = try await AppleRuleInterpreter().interpret(
+        let interpreter = AppleRuleInterpreter()
+        async let organizationDrafts = interpreter.interpret(
           text: text, destinations: self.destinations)
+        async let namingDrafts = interpreter.interpretNaming(text: text)
+        self.ruleDrafts = try await organizationDrafts
+        self.namingRuleDrafts = try await namingDrafts
       } catch {
         self.lastError = error.localizedDescription
       }
@@ -725,6 +899,66 @@ final class AppModel: ObservableObject {
     } catch { lastError = error.localizedDescription }
   }
 
+  func saveNamingRuleDraft(_ draft: NamingRuleDraft) {
+    guard let workspace else { return }
+    do {
+      try FilenameTemplateEngine().validate(draft.template)
+      guard draft.condition.hasDeterministicConditions
+        || draft.condition.semanticDescription != nil
+      else { throw OrganizerError.invalidFilename("请补全命名规则条件") }
+      let rule = NamingRule(
+        workspaceID: workspace.id,
+        originalText: draft.originalText,
+        condition: draft.condition,
+        template: draft.template)
+      try database?.saveNamingRule(rule)
+      namingRules.append(rule)
+      namingRuleDrafts.removeAll { $0.id == draft.id }
+      statusMessage = "命名规则已保存，将用于下一次整理"
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func toggleNamingRule(_ rule: NamingRule) {
+    guard let index = namingRules.firstIndex(where: { $0.id == rule.id }) else { return }
+    namingRules[index].isEnabled.toggle()
+    do { try database?.saveNamingRule(namingRules[index]) }
+    catch { lastError = error.localizedDescription }
+  }
+
+  func deleteNamingRule(_ rule: NamingRule) {
+    do {
+      try database?.deleteNamingRule(rule.id)
+      namingRules.removeAll { $0.id == rule.id }
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func approveNamingRuleSuggestion(_ suggestion: NamingRuleSuggestion) {
+    guard let workspace else { return }
+    var updated = suggestion
+    updated.state = .approved
+    let rule = NamingRule(
+      workspaceID: workspace.id,
+      originalText: "根据已确认改名生成：\(suggestion.template.pattern)",
+      condition: suggestion.condition,
+      template: suggestion.template,
+      isDerived: true)
+    do {
+      try database?.saveNamingRule(rule)
+      try database?.saveNamingRuleSuggestion(updated)
+      namingRules.append(rule)
+      namingRuleSuggestions.removeAll { $0.id == suggestion.id }
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func rejectNamingRuleSuggestion(_ suggestion: NamingRuleSuggestion) {
+    var updated = suggestion
+    updated.state = .rejected
+    do {
+      try database?.saveNamingRuleSuggestion(updated)
+      namingRuleSuggestions.removeAll { $0.id == suggestion.id }
+    } catch { lastError = error.localizedDescription }
+  }
+
   func useHistoryEntry(_ entry: HistoryEntry) {
     guard let receipt = entry.receipt, !isWorking else { return }
     currentPlan = entry.plan
@@ -749,6 +983,7 @@ final class AppModel: ObservableObject {
     destinations = []
     proposals = []
     folderProposals = []
+    renameProposals = []
     selectedItemIDs = []
     selectedItemID = nil
     decisionLocks = []
@@ -757,6 +992,7 @@ final class AppModel: ObservableObject {
     progress = nil
     currentPlan = nil
     receipt = nil
+    namingRuleDrafts = []
     lastError = nil
   }
 
@@ -769,10 +1005,21 @@ final class AppModel: ObservableObject {
         root: URL(fileURLWithPath: workspace.libraryPath, isDirectory: true),
         destinations: indexed)
       destinations = try learning.enrich(destinations: indexed, libraryID: workspace.id)
+      let namingLearning = NamingLearningService(database: database)
+      try namingLearning.refreshExistingLibrarySamples(
+        workspaceID: workspace.id,
+        root: URL(fileURLWithPath: workspace.libraryPath, isDirectory: true),
+        destinations: destinations)
       rules = try database.rules(workspaceID: workspace.id)
+      namingRules = try database.namingRules(workspaceID: workspace.id)
+      namingRuleSuggestions = try database.namingRuleSuggestions(workspaceID: workspace.id)
+        .filter { $0.state == .pending }
       historyEntries = try HistoryStore(database: database).entries(workspaceID: workspace.id)
-      learningSampleCount = try learning.activeSamples(libraryID: workspace.id)
+      let moveSamples = try learning.activeSamples(libraryID: workspace.id)
         .filter { $0.confirmation != .existingLibrary }.count
+      let renameSamples = try namingLearning.activeSamples(workspaceID: workspace.id)
+        .filter { $0.source != .existingLibrary }.count
+      learningSampleCount = moveSamples + renameSamples
     } catch { lastError = error.localizedDescription }
   }
 
@@ -783,9 +1030,22 @@ final class AppModel: ObservableObject {
 
   private func refreshLearningCount() {
     guard let workspace, let database else { return }
-    learningSampleCount = (try? LearningService(database: database)
+    let moveSamples = (try? LearningService(database: database)
       .activeSamples(libraryID: workspace.id)
       .filter { $0.confirmation != .existingLibrary }.count) ?? 0
+    let renameSamples = (try? NamingLearningService(database: database)
+      .activeSamples(workspaceID: workspace.id)
+      .filter { $0.source != .existingLibrary }.count) ?? 0
+    learningSampleCount = moveSamples + renameSamples
+  }
+
+  private func refreshNamingLearning() {
+    guard let workspace, let database else { return }
+    do {
+      let service = NamingLearningService(database: database)
+      namingRuleSuggestions = try service.suggestRules(workspaceID: workspace.id)
+        .filter { $0.state == .pending }
+    } catch { lastError = error.localizedDescription }
   }
 
   private func setProgress(_ value: OrganizationProgress, sessionID: UUID) {

@@ -17,6 +17,8 @@ struct HistoryView: View {
         }
         ForEach(model.historyEntries, id: \.plan.id) { entry in
           let completed = entry.receipt?.results.filter { $0.state == .completed }.count ?? 0
+          let moveCount = entry.plan.operations.filter { $0.kind == .move }.count
+          let renameCount = entry.plan.operations.filter { $0.namingDecisionFeatures != nil }.count
           let retryableBlocked = entry.receipt?.isUndoReceipt == true
             ? entry.receipt?.results.filter { $0.state == .blocked }.count ?? 0 : 0
           let canUndo = completed + retryableBlocked > 0
@@ -29,6 +31,13 @@ struct HistoryView: View {
                 .fontWeight(.semibold)
               Text("完成 \(completed) 项 · 问题 \(issues) 项 · 共 \(entry.plan.operations.count) 个操作")
                 .font(.caption).foregroundStyle(.secondary)
+              Text("移动 \(moveCount) 项 · 改名 \(renameCount) 项")
+                .font(.caption).foregroundStyle(.secondary)
+              ForEach(entry.plan.operations.filter { $0.kind == .move || $0.kind == .rename }) {
+                operation in
+                Text(historyOperationSummary(operation))
+                .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+              }
             }
             Spacer()
             if canUndo {
@@ -47,4 +56,13 @@ struct HistoryView: View {
       }.padding(28).frame(maxWidth: 900)
     }
   }
+}
+
+private func historyOperationSummary(_ operation: PlannedOperation) -> String {
+  guard let sourcePath = operation.sourcePath else {
+    return URL(fileURLWithPath: operation.destinationPath).lastPathComponent
+  }
+  let sourceName = URL(fileURLWithPath: sourcePath).lastPathComponent
+  let destinationName = URL(fileURLWithPath: operation.destinationPath).lastPathComponent
+  return "\(sourceName)  →  \(destinationName)"
 }

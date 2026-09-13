@@ -42,8 +42,11 @@
       XCTAssertTrue(app.buttons["整理计划"].waitForExistence(timeout: 5))
       XCTAssertTrue(app.staticTexts["创作/音乐/乐谱"].exists)
       XCTAssertTrue(app.staticTexts["Moonlight Score.pdf"].exists)
+      XCTAssertTrue(app.staticTexts["Moonlight Sonata.pdf"].exists)
+      XCTAssertTrue(app.buttons["采用建议"].exists)
       app.buttons["我的规则"].click()
       XCTAssertTrue(app.staticTexts["用一句话描述你的整理习惯"].exists)
+      XCTAssertTrue(app.staticTexts["命名规则"].exists)
       app.buttons["历史与撤销"].click()
       XCTAssertTrue(app.staticTexts["历史与撤销"].exists)
     }

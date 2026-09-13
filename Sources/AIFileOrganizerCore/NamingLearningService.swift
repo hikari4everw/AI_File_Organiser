@@ -83,6 +83,7 @@ public struct NamingLearningService: Sendable {
         ? RuleCondition(fileExtensions: extensions)
         : RuleCondition(itemKinds: Set(unique.map { $0.features.itemKind }))
       return NamingRuleSuggestion(
+        id: DestinationIndexer().identifier(for: "naming|\(workspaceID.uuidString)|\(pattern)"),
         workspaceID: workspaceID,
         condition: condition,
         template: FilenameTemplate(pattern: pattern),

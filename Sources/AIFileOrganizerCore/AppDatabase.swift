@@ -806,12 +806,34 @@ public final class AppDatabase: @unchecked Sendable {
           sql: """
             INSERT INTO naming_rule_suggestions (id, workspace_id, state, payload_json)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+            payload_json = CASE WHEN naming_rule_suggestions.state = 'pending'
+              THEN excluded.payload_json ELSE naming_rule_suggestions.payload_json END
             """,
           arguments: [
             suggestion.id.uuidString, suggestion.workspaceID.uuidString,
             suggestion.state.rawValue, payload,
           ])
       }
+    }
+  }
+
+  public func namingRuleSuggestions(workspaceID: UUID) throws -> [NamingRuleSuggestion] {
+    try queue.read { db in
+      try Data.fetchAll(
+        db,
+        sql: "SELECT payload_json FROM naming_rule_suggestions WHERE workspace_id = ? ORDER BY rowid",
+        arguments: [workspaceID.uuidString]
+      ).map { try decode(NamingRuleSuggestion.self, from: $0) }
+    }
+  }
+
+  public func saveNamingRuleSuggestion(_ suggestion: NamingRuleSuggestion) throws {
+    let payload = try encode(suggestion)
+    try queue.write { db in
+      try db.execute(
+        sql: "UPDATE naming_rule_suggestions SET state = ?, payload_json = ? WHERE id = ?",
+        arguments: [suggestion.state.rawValue, payload, suggestion.id.uuidString])
     }
   }
 

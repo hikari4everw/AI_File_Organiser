@@ -44,6 +44,7 @@ public struct NamingRuleEngine: Sendable {
           source: .namingRule,
           disposition: .blocked,
           ruleID: first.rule.id,
+          templatePattern: first.rule.template.pattern,
           missingFields: first.result.missingFields,
           reason: first.result.missingFields.isEmpty ? "命名结果不合法" : "命名规则缺少必要字段"
         )
@@ -56,6 +57,7 @@ public struct NamingRuleEngine: Sendable {
         source: .namingRule,
         disposition: .selectedByRule,
         ruleID: first.rule.id,
+        templatePattern: first.rule.template.pattern,
         reason: "匹配用户命名规则"
       )
     }

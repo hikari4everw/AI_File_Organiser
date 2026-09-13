@@ -54,10 +54,12 @@ struct OrganizerView: View {
       }
     }
     .confirmationDialog("确认执行本次整理？", isPresented: $showExecutionConfirmation) {
-      Button("移动 \(preparedMoveCount) 个项目") { model.executePreparedPlan() }
+      Button("移动 \(preparedMoveCount) 项，改名 \(preparedRenameCount) 项") {
+        model.executePreparedPlan()
+      }
       Button("取消", role: .cancel) { model.discardPreparedPlan() }
     } message: {
-      Text("不会覆盖、删除或自动重命名文件。执行前会再次检查所有项目。")
+      Text("只执行当前已确认的移动和改名，不覆盖或删除文件。执行前会再次检查所有项目。")
     }
     .alert("创建资料库一级目录", isPresented: $showNewFolder) {
       TextField("目录名称", text: $newFolderName)
@@ -226,6 +228,7 @@ struct OrganizerView: View {
       }
       Button("新建目录…") { showNewFolder = true }
       Button("保留原处") { model.keep(model.selectedItemIDs) }
+      Button("这些项目保留原名") { model.rejectRenames(for: model.selectedItemIDs) }
       Button("取消选择") { model.selectedItemIDs.removeAll() }
     }
     .padding(.horizontal, 18).padding(.vertical, 10)
@@ -249,6 +252,8 @@ struct OrganizerView: View {
             Divider()
             Text("为什么这样建议").font(.headline)
             Text(proposal.reason).foregroundStyle(.secondary)
+            Divider()
+            RenameReviewView(model: model, item: item)
             Menu("更改目标") {
               ForEach(model.destinations) { destination in
                 Button(destination.relativePath) {
@@ -272,7 +277,7 @@ struct OrganizerView: View {
       VStack(alignment: .leading, spacing: 3) {
         Text(model.statusMessage).fontWeight(.medium)
         Text(
-          "将移动 \(moveCount) 项 · 创建 \(approvedFolderCount) 个目录 · 保留 \(model.keptProposals.count) 项 · \(model.reviewProposals.count + model.pendingFolderCount) 个问题"
+          "移动 \(moveCount) 项 · 改名 \(model.selectedRenameProposals.count) 项 · 创建 \(approvedFolderCount) 个目录 · 保留 \(model.keptProposals.count) 项 · 待确认改名 \(model.pendingRenameCount) 项 · 阻塞 \(blockingCount) 项"
         )
         .font(.caption).foregroundStyle(.secondary)
       }
@@ -314,6 +319,15 @@ struct OrganizerView: View {
 
   private var preparedMoveCount: Int {
     model.currentPlan?.operations.filter { $0.kind == .move }.count ?? moveCount
+  }
+
+  private var preparedRenameCount: Int {
+    model.currentPlan?.operations.filter { $0.namingDecisionFeatures != nil }.count
+      ?? model.selectedRenameProposals.count
+  }
+
+  private var blockingCount: Int {
+    model.reviewProposals.count + model.pendingFolderCount + model.blockedRenameCount
   }
 }
 
@@ -384,7 +398,23 @@ private struct ProposalRow: View {
       Image(systemName: item.kind == .file ? "doc" : "folder")
         .foregroundStyle(proposal.reviewDecision == .needsReview ? .orange : .secondary)
       VStack(alignment: .leading, spacing: 3) {
-        Text(item.name).lineLimit(1)
+        if let proposedName = model.proposedFullName(for: item),
+          proposedName != item.name,
+          let rename = model.renameProposal(for: item.id)
+        {
+          HStack(spacing: 6) {
+            Text(item.name).foregroundStyle(.secondary)
+            Image(systemName: "arrow.right").foregroundStyle(.tertiary)
+            Text(proposedName).fontWeight(.medium)
+            if rename.disposition == .pending {
+              Text("待确认").font(.caption2).foregroundStyle(.orange)
+            }
+          }
+          .lineLimit(1)
+          .accessibilityIdentifier("rename-row-preview")
+        } else {
+          Text(item.name).lineLimit(1)
+        }
         Text("\(URL(fileURLWithPath: item.path).deletingLastPathComponent().lastPathComponent)  →  \(model.destinationName(proposal.destinationID))")
           .font(.caption).foregroundStyle(.secondary).lineLimit(1)
       }
