@@ -78,4 +78,88 @@ import Testing
       try FilenameValidator().validatedFullName(baseName: "Renamed", item: item)
     }
   }
+
+  @Test func namingRuleProducesSelectedRenameWhenFieldsAreAvailable() throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/source.pdf", name: "source.pdf", kind: .file,
+      fileExtension: "pdf")
+    let context = ItemContext(
+      snapshot: item,
+      normalizedKeywords: [],
+      spotlightTitle: "Moonlight Sonata",
+      spotlightAuthors: ["Beethoven"]
+    )
+    let rule = NamingRule(
+      workspaceID: UUID(),
+      originalText: "PDF 命名为作者-标题",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      template: FilenameTemplate(pattern: "{作者} - {标题}")
+    )
+
+    let proposals = NamingRuleEngine().proposals(
+      sessionID: sessionID, contexts: [context], rules: [rule])
+
+    let proposal = try #require(proposals.first)
+    #expect(proposal.suggestedBaseName == "Beethoven - Moonlight Sonata")
+    #expect(proposal.disposition == .selectedByRule)
+    #expect(proposal.missingFields.isEmpty)
+  }
+
+  @Test func namingRuleKeepsOriginalNameWhenARequiredFieldIsMissing() throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/source.pdf", name: "source.pdf", kind: .file,
+      fileExtension: "pdf")
+    let rule = NamingRule(
+      workspaceID: UUID(),
+      originalText: "PDF 命名为作者-标题",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      template: FilenameTemplate(pattern: "{作者} - {标题}")
+    )
+
+    let proposals = NamingRuleEngine().proposals(
+      sessionID: sessionID,
+      contexts: [ItemContext(snapshot: item, normalizedKeywords: [], spotlightTitle: "Report")],
+      rules: [rule]
+    )
+
+    let proposal = try #require(proposals.first)
+    #expect(proposal.suggestedBaseName == "source")
+    #expect(proposal.disposition == .blocked)
+    #expect(proposal.missingFields == [.author])
+  }
+
+  @Test func conflictingNamingRulesBlockRenameWithoutChoosingEitherName() throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/source.pdf", name: "source.pdf", kind: .file,
+      fileExtension: "pdf")
+    let first = NamingRule(
+      workspaceID: UUID(), originalText: "A", condition: RuleCondition(fileExtensions: ["pdf"]),
+      template: FilenameTemplate(pattern: "A - {原标题}"))
+    let second = NamingRule(
+      workspaceID: first.workspaceID, originalText: "B",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      template: FilenameTemplate(pattern: "B - {原标题}"))
+
+    let proposal = try #require(NamingRuleEngine().proposals(
+      sessionID: sessionID,
+      contexts: [ItemContext(snapshot: item, normalizedKeywords: [])],
+      rules: [first, second]
+    ).first)
+
+    #expect(proposal.disposition == .blocked)
+    #expect(proposal.suggestedBaseName == "source")
+    #expect(proposal.reason.contains("多个命名规则"))
+  }
+
+  @Test func fallbackNamingInterpreterExtractsEditableTemplate() async throws {
+    let drafts = try await AppleRuleInterpreter().interpretNaming(
+      text: "PDF 乐谱命名为 {作者} - {标题}")
+
+    let draft = try #require(drafts.first)
+    #expect(draft.condition.fileExtensions == ["pdf"])
+    #expect(draft.template.pattern == "{作者} - {标题}")
+  }
 }

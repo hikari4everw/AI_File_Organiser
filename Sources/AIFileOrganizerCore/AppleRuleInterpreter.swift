@@ -25,6 +25,44 @@ import Foundation
 public struct AppleRuleInterpreter: RuleInterpreter {
   public init() {}
 
+  public func interpretNaming(text: String) async throws -> [NamingRuleDraft] {
+    let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !cleaned.isEmpty else { return [] }
+    let markers = ["命名为", "重命名为", "rename as"]
+    guard let marker = markers.compactMap({ value -> (String, Range<String.Index>)? in
+      cleaned.range(of: value, options: .caseInsensitive).map { (value, $0) }
+    }).min(by: { $0.1.lowerBound < $1.1.lowerBound }) else {
+      return []
+    }
+    let pattern = String(cleaned[marker.1.upperBound...])
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let template = FilenameTemplate(pattern: pattern)
+    try FilenameTemplateEngine().validate(template)
+    let knownExtensions = [
+      "pdf", "jpg", "jpeg", "png", "heic", "gif", "txt", "md", "doc", "docx",
+      "xlsx", "csv", "pptx", "mp3", "flac", "wav", "mp4", "mov", "zip", "dmg", "pkg",
+    ]
+    let extensions = knownExtensions.filter {
+      cleaned.range(of: "\\b\($0)\\b", options: [.regularExpression, .caseInsensitive]) != nil
+    }
+    var kinds: Set<ItemKind> = []
+    if cleaned.contains("文件夹") || cleaned.contains("目录") { kinds.insert(.directory) }
+    let conditionText = String(cleaned[..<marker.1.lowerBound])
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return [
+      NamingRuleDraft(
+        originalText: cleaned,
+        condition: RuleCondition(
+          itemKinds: kinds,
+          fileExtensions: Set(extensions),
+          semanticDescription: extensions.isEmpty && kinds.isEmpty && !conditionText.isEmpty
+            ? conditionText : nil
+        ),
+        template: template
+      )
+    ]
+  }
+
   public func interpret(text: String, destinations: [DestinationProfile]) async throws
     -> [RuleDraft]
   {
