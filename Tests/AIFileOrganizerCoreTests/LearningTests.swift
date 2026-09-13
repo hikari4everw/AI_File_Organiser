@@ -94,4 +94,67 @@ import Testing
     )
     #expect(try service.activeSamples(libraryID: boundedLibraryID).count == 1)
   }
+
+  @Test func namingLearningIsIdempotentRetractableAndNeedsFiveItemsAcrossTwoSessions() throws {
+    let database = try AppDatabase.inMemory()
+    let workspaceID = UUID()
+    let service = NamingLearningService(database: database)
+    let sessions = [UUID(), UUID()]
+    var operationIDs: [UUID] = []
+    for index in 0..<5 {
+      let operationID = UUID()
+      operationIDs.append(operationID)
+      let sample = NamingSample(
+        workspaceID: workspaceID,
+        sessionID: sessions[index % 2],
+        operationID: operationID,
+        itemIdentity: "item-\(index)",
+        destinationID: UUID(uuidString: "00000000-0000-0000-0000-000000000001"),
+        source: .userApproved,
+        features: NamingDecisionFeatures(
+          itemKind: .file,
+          fileExtension: "pdf",
+          originalBaseName: "source-\(index)",
+          finalBaseName: "Author - Title \(index)",
+          templatePattern: "{作者} - {标题}"),
+        createdAt: Date().addingTimeInterval(Double(index - 10))
+      )
+      try service.record(sample)
+      try service.record(sample)
+      if index == 3 {
+        #expect(try service.suggestRules(workspaceID: workspaceID).isEmpty)
+      }
+    }
+
+    #expect(try service.activeSamples(workspaceID: workspaceID).count == 5)
+    let suggestion = try #require(service.suggestRules(workspaceID: workspaceID).first)
+    #expect(suggestion.template.pattern == "{作者} - {标题}")
+    #expect(suggestion.supportingSampleIDs.count == 5)
+
+    try service.retract(operationID: operationIDs[0])
+    #expect(try service.activeSamples(workspaceID: workspaceID).count == 4)
+    #expect(try service.suggestRules(workspaceID: workspaceID).isEmpty)
+  }
+
+  @Test func namingStyleSamplesOnlyReadDirectChildrenAndStayBounded() throws {
+    let database = try AppDatabase.inMemory()
+    let service = NamingLearningService(database: database)
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let scores = root.appendingPathComponent("Music/Scores")
+    let nested = scores.appendingPathComponent("Nested")
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    for index in 0..<35 {
+      try Data().write(to: scores.appendingPathComponent("Composer - Work \(index).pdf"))
+    }
+    try Data().write(to: nested.appendingPathComponent("Hidden Depth.pdf"))
+    let destination = DestinationProfile(relativePath: "Music/Scores", displayName: "Scores")
+
+    try service.refreshExistingLibrarySamples(
+      workspaceID: UUID(), root: root, destinations: [destination])
+
+    let examples = try service.styleExamples(destinationID: destination.id)
+    #expect(examples.count == 30)
+    #expect(!examples.contains("Hidden Depth"))
+  }
 }

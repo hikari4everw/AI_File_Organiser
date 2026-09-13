@@ -77,9 +77,37 @@ import Testing
       "workspaces", "sessions", "item_snapshots", "proposals", "folder_proposals", "plans",
       "operations", "decision_records", "libraries", "destinations", "organization_rules",
       "learning_events", "learning_samples", "rule_suggestions",
+      "rename_proposals", "naming_rules", "naming_samples", "naming_rule_suggestions",
     ] {
       #expect(try database.rowCount(table) == 0)
     }
+  }
+
+  @Test func persistsRenameProposalsAndNamingRules() throws {
+    let database = try AppDatabase.inMemory()
+    let workspace = Workspace(
+      inboxPath: "/tmp/inbox", libraryPath: "/tmp/library",
+      inboxVolumeID: "volume", libraryVolumeID: "volume")
+    let session = OrganizationSession(workspaceID: workspace.id)
+    let item = ItemSnapshot(
+      sessionID: session.id, path: "/tmp/inbox/hash.pdf", name: "hash.pdf", kind: .file,
+      fileExtension: "pdf")
+    let proposal = RenameProposal(
+      sessionID: session.id, itemID: item.id, originalName: item.name,
+      suggestedBaseName: "Annual Report", source: .foundationModel, reason: "title")
+    let rule = NamingRule(
+      workspaceID: workspace.id, originalText: "PDF 命名为标题",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      template: FilenameTemplate(pattern: "{标题}"))
+    try database.saveWorkspace(workspace)
+    try database.saveSession(session)
+    try database.saveSnapshots([item])
+
+    try database.saveRenameProposals([proposal])
+    try database.saveNamingRule(rule)
+
+    #expect(try database.renameProposals(sessionID: session.id) == [proposal])
+    #expect(try database.namingRules(workspaceID: workspace.id) == [rule])
   }
 
   @Test func persistsWorkspaceAndSession() throws {

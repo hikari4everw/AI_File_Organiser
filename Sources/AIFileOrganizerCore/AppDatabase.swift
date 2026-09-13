@@ -236,6 +236,40 @@ public final class AppDatabase: @unchecked Sendable {
       try db.drop(table: "organization_rules")
       try db.rename(table: "organization_rules_v2", to: "organization_rules")
     }
+    migrator.registerMigration("v2.2-filename-renaming") { db in
+      try db.create(table: "rename_proposals") { table in
+        table.column("id", .text).primaryKey()
+        table.column("session_id", .text).notNull().indexed()
+        table.column("item_id", .text).notNull().indexed()
+        table.column("disposition", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.uniqueKey(["session_id", "item_id"])
+      }
+      try db.create(table: "naming_rules") { table in
+        table.column("id", .text).primaryKey()
+        table.column("workspace_id", .text).notNull().indexed()
+        table.column("is_enabled", .boolean).notNull()
+        table.column("payload_json", .blob).notNull()
+      }
+      try db.create(table: "naming_samples") { table in
+        table.column("id", .text).primaryKey()
+        table.column("workspace_id", .text).notNull().indexed()
+        table.column("session_id", .text).notNull()
+        table.column("operation_id", .text).unique()
+        table.column("item_identity", .text).notNull()
+        table.column("destination_id", .text).indexed()
+        table.column("source", .text).notNull()
+        table.column("is_active", .boolean).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.column("created_at", .datetime).notNull()
+      }
+      try db.create(table: "naming_rule_suggestions") { table in
+        table.column("id", .text).primaryKey()
+        table.column("workspace_id", .text).notNull().indexed()
+        table.column("state", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+      }
+    }
     try migrator.migrate(queue)
   }
 
@@ -343,6 +377,35 @@ public final class AppDatabase: @unchecked Sendable {
           ]
         )
       }
+    }
+  }
+
+  public func saveRenameProposals(_ proposals: [RenameProposal]) throws {
+    let rows = try proposals.map { ($0, try encode($0)) }
+    try queue.write { db in
+      for (proposal, payload) in rows {
+        try db.execute(
+          sql: """
+            INSERT INTO rename_proposals (id, session_id, item_id, disposition, payload_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, item_id) DO UPDATE SET
+            id = excluded.id, disposition = excluded.disposition, payload_json = excluded.payload_json
+            """,
+          arguments: [
+            proposal.id.uuidString, proposal.sessionID.uuidString, proposal.itemID.uuidString,
+            proposal.disposition.rawValue, payload,
+          ])
+      }
+    }
+  }
+
+  public func renameProposals(sessionID: UUID) throws -> [RenameProposal] {
+    try queue.read { db in
+      try Data.fetchAll(
+        db,
+        sql: "SELECT payload_json FROM rename_proposals WHERE session_id = ? ORDER BY rowid",
+        arguments: [sessionID.uuidString]
+      ).map { try decode(RenameProposal.self, from: $0) }
     }
   }
 
@@ -588,6 +651,140 @@ public final class AppDatabase: @unchecked Sendable {
     }
   }
 
+  public func saveNamingRule(_ rule: NamingRule) throws {
+    let payload = try encode(rule)
+    try queue.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO naming_rules (id, workspace_id, is_enabled, payload_json)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET is_enabled = excluded.is_enabled,
+          payload_json = excluded.payload_json
+          """,
+        arguments: [rule.id.uuidString, rule.workspaceID.uuidString, rule.isEnabled, payload])
+    }
+  }
+
+  public func namingRules(workspaceID: UUID) throws -> [NamingRule] {
+    try queue.read { db in
+      try Data.fetchAll(
+        db,
+        sql: "SELECT payload_json FROM naming_rules WHERE workspace_id = ? ORDER BY rowid",
+        arguments: [workspaceID.uuidString]
+      ).map { try decode(NamingRule.self, from: $0) }
+    }
+  }
+
+  public func deleteNamingRule(_ id: UUID) throws {
+    try queue.write { db in
+      try db.execute(sql: "DELETE FROM naming_rules WHERE id = ?", arguments: [id.uuidString])
+    }
+  }
+
+  public func saveNamingSample(_ sample: NamingSample) throws {
+    let payload = try encode(sample)
+    try queue.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO naming_samples
+          (id, workspace_id, session_id, operation_id, item_identity, destination_id,
+           source, is_active, payload_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(operation_id) DO NOTHING
+          """,
+        arguments: [
+          sample.id.uuidString, sample.workspaceID.uuidString, sample.sessionID.uuidString,
+          sample.operationID?.uuidString, sample.itemIdentity, sample.destinationID?.uuidString,
+          sample.source.rawValue, sample.isActive, payload, sample.createdAt,
+        ])
+    }
+  }
+
+  public func namingSamples(workspaceID: UUID, activeOnly: Bool = false) throws
+    -> [NamingSample]
+  {
+    try queue.read { db in
+      let suffix = activeOnly ? " AND is_active = 1" : ""
+      return try Data.fetchAll(
+        db,
+        sql: "SELECT payload_json FROM naming_samples WHERE workspace_id = ?\(suffix) ORDER BY created_at",
+        arguments: [workspaceID.uuidString]
+      ).map { try decode(NamingSample.self, from: $0) }
+    }
+  }
+
+  public func namingSamples(destinationID: UUID, activeOnly: Bool = false) throws
+    -> [NamingSample]
+  {
+    try queue.read { db in
+      let suffix = activeOnly ? " AND is_active = 1" : ""
+      return try Data.fetchAll(
+        db,
+        sql: "SELECT payload_json FROM naming_samples WHERE destination_id = ?\(suffix) ORDER BY created_at",
+        arguments: [destinationID.uuidString]
+      ).map { try decode(NamingSample.self, from: $0) }
+    }
+  }
+
+  public func replaceExistingNamingSamples(workspaceID: UUID, samples: [NamingSample]) throws {
+    let rows = try samples.map { ($0, try encode($0)) }
+    try queue.write { db in
+      try db.execute(
+        sql: "DELETE FROM naming_samples WHERE workspace_id = ? AND source = ?",
+        arguments: [workspaceID.uuidString, NamingSampleSource.existingLibrary.rawValue])
+      for (sample, payload) in rows {
+        try db.execute(
+          sql: """
+            INSERT INTO naming_samples
+            (id, workspace_id, session_id, operation_id, item_identity, destination_id,
+             source, is_active, payload_json, created_at)
+            VALUES (?, ?, ?, NULL, ?, ?, ?, 1, ?, ?)
+            """,
+          arguments: [
+            sample.id.uuidString, sample.workspaceID.uuidString, sample.sessionID.uuidString,
+            sample.itemIdentity, sample.destinationID?.uuidString, sample.source.rawValue,
+            payload, sample.createdAt,
+          ])
+      }
+    }
+  }
+
+  public func retractNamingSample(operationID: UUID) throws {
+    try queue.write { db in
+      guard let data: Data = try Data.fetchOne(
+        db, sql: "SELECT payload_json FROM naming_samples WHERE operation_id = ?",
+        arguments: [operationID.uuidString])
+      else { return }
+      var sample = try decode(NamingSample.self, from: data)
+      sample.isActive = false
+      try db.execute(
+        sql: "UPDATE naming_samples SET is_active = 0, payload_json = ? WHERE operation_id = ?",
+        arguments: [try encode(sample), operationID.uuidString])
+    }
+  }
+
+  public func replaceNamingRuleSuggestions(
+    workspaceID: UUID, suggestions: [NamingRuleSuggestion]
+  ) throws {
+    let rows = try suggestions.map { ($0, try encode($0)) }
+    try queue.write { db in
+      try db.execute(
+        sql: "DELETE FROM naming_rule_suggestions WHERE workspace_id = ? AND state = 'pending'",
+        arguments: [workspaceID.uuidString])
+      for (suggestion, payload) in rows {
+        try db.execute(
+          sql: """
+            INSERT INTO naming_rule_suggestions (id, workspace_id, state, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+          arguments: [
+            suggestion.id.uuidString, suggestion.workspaceID.uuidString,
+            suggestion.state.rawValue, payload,
+          ])
+      }
+    }
+  }
+
   public func learningSamples(libraryID: UUID, activeOnly: Bool = false) throws
     -> [LearningSample]
   {
@@ -657,6 +854,7 @@ public final class AppDatabase: @unchecked Sendable {
       "workspaces", "sessions", "item_snapshots", "proposals", "folder_proposals", "plans",
       "operations", "decision_records", "libraries", "destinations", "organization_rules",
       "learning_events", "learning_samples", "rule_suggestions",
+      "rename_proposals", "naming_rules", "naming_samples", "naming_rule_suggestions",
     ]
     guard allowed.contains(table) else { throw OrganizerError.persistenceFailed("未知数据表") }
     return try queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)") ?? 0 }
