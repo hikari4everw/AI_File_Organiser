@@ -15,6 +15,13 @@ public protocol ClassificationProvider: Sendable {
     -> [ModelProposal]
 }
 
+public protocol FilenameSuggestionProvider: Sendable {
+  var availabilityDescription: String { get }
+  var isAvailable: Bool { get }
+  func suggestNames(requests: [FilenameSuggestionRequest]) async throws
+    -> [ModelFilenameSuggestion]
+}
+
 public protocol DecisionPolicy: Sendable {
   func evaluate(proposal: ModelProposal, deterministicCandidates: [RankedCandidate])
     -> ReviewDecision

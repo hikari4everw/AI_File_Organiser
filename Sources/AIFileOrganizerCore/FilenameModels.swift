@@ -140,3 +140,51 @@ public struct RenameProposal: Codable, Hashable, Identifiable, Sendable {
     }
   }
 }
+
+public struct FilenameSuggestionRequest: Codable, Hashable, Sendable {
+  public var context: ItemContext
+  public var template: FilenameTemplate?
+  public var styleExamples: [String]
+  public var ruleID: UUID?
+
+  public init(
+    context: ItemContext, template: FilenameTemplate? = nil, styleExamples: [String] = [],
+    ruleID: UUID? = nil
+  ) {
+    self.context = context
+    self.template = template
+    self.styleExamples = Array(styleExamples.prefix(8))
+    self.ruleID = ruleID
+  }
+}
+
+public struct ModelFilenameSuggestion: Codable, Hashable, Sendable {
+  public var itemID: UUID
+  public var suggestedBaseName: String
+  public var fields: [FilenameField: String]
+  public var reason: String
+
+  public init(
+    itemID: UUID, suggestedBaseName: String, fields: [FilenameField: String] = [:],
+    reason: String
+  ) {
+    self.itemID = itemID
+    self.suggestedBaseName = suggestedBaseName
+    self.fields = fields
+    self.reason = reason
+  }
+}
+
+public struct FilenameSuggestionPipelineResult: Sendable {
+  public var proposals: [RenameProposal]
+  public var contextsByItem: [UUID: ItemContext]
+  public var modelStatus: String
+
+  public init(
+    proposals: [RenameProposal], contextsByItem: [UUID: ItemContext], modelStatus: String
+  ) {
+    self.proposals = proposals
+    self.contextsByItem = contextsByItem
+    self.modelStatus = modelStatus
+  }
+}

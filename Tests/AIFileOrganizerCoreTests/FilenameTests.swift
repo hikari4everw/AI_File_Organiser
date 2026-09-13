@@ -3,6 +3,26 @@ import Testing
 
 @testable import AIFileOrganizerCore
 
+private struct FilenameTestExtractor: ContentExtractor {
+  let text: String
+  func extractContext(for item: ItemSnapshot) async -> ExtractedContext {
+    ExtractedContext(text: text, source: "test", status: .success)
+  }
+}
+
+private struct FilenameTestProvider: FilenameSuggestionProvider {
+  var availabilityDescription: String { available ? "available" : "unavailable" }
+  let available: Bool
+  let suggestions: [ModelFilenameSuggestion]
+  var isAvailable: Bool { available }
+
+  func suggestNames(requests: [FilenameSuggestionRequest]) async throws
+    -> [ModelFilenameSuggestion]
+  {
+    suggestions
+  }
+}
+
 @Suite struct FilenameTests {
   @Test func templateRendersKnownFieldsAndReportsMissingOnes() throws {
     let result = try FilenameTemplateEngine().render(
@@ -161,5 +181,77 @@ import Testing
     let draft = try #require(drafts.first)
     #expect(draft.condition.fileExtensions == ["pdf"])
     #expect(draft.template.pattern == "{作者} - {标题}")
+  }
+
+  @Test(arguments: [
+    "550e8400-e29b-41d4-a716-446655440000.pdf",
+    "8f14e45fceea167a5a36dedd4bea2543.pdf",
+    "%E6%9C%88%E5%85%89.pdf",
+    "bad\u{FFFD}name.pdf",
+  ])
+  func qualityDetectorFlagsOnlyClearUnreadablePatterns(_ name: String) {
+    #expect(FilenameQualityDetector().requiresSuggestion(name: name))
+  }
+
+  @Test(arguments: ["report-2026.pdf", "IMG_1234.jpg", "Moonlight Sonata.pdf"])
+  func qualityDetectorKeepsReadableNames(_ name: String) {
+    #expect(!FilenameQualityDetector().requiresSuggestion(name: name))
+  }
+
+  @Test func aiSuggestionIsPendingAndUsesExtractedContent() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID,
+      path: "/tmp/550e8400-e29b-41d4-a716-446655440000.pdf",
+      name: "550e8400-e29b-41d4-a716-446655440000.pdf",
+      kind: .file,
+      fileExtension: "pdf")
+    let suggestion = ModelFilenameSuggestion(
+      itemID: item.id,
+      suggestedBaseName: "Moonlight Sonata",
+      fields: [.title: "Moonlight Sonata"],
+      reason: "PDF 首页标题")
+
+    let result = await FilenameSuggestionPipeline(
+      extractor: FilenameTestExtractor(text: "Moonlight Sonata"),
+      provider: FilenameTestProvider(available: true, suggestions: [suggestion])
+    ).run(sessionID: sessionID, items: [item])
+
+    let proposal = try #require(result.proposals.first)
+    #expect(proposal.suggestedBaseName == "Moonlight Sonata")
+    #expect(proposal.disposition == .pending)
+    #expect(proposal.source == .foundationModel)
+    #expect(result.contextsByItem[item.id]?.extracted.text == "Moonlight Sonata")
+  }
+
+  @Test func unavailableModelDoesNotCreateFakeRenameSuggestion() async {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/8f14e45fceea167a5a36dedd4bea2543.pdf",
+      name: "8f14e45fceea167a5a36dedd4bea2543.pdf", kind: .file, fileExtension: "pdf")
+
+    let result = await FilenameSuggestionPipeline(
+      extractor: FilenameTestExtractor(text: "Report"),
+      provider: FilenameTestProvider(available: false, suggestions: [])
+    ).run(sessionID: sessionID, items: [item])
+
+    #expect(result.proposals.isEmpty)
+    #expect(result.modelStatus == "unavailable")
+  }
+
+  @Test func manualRequestCanSuggestRenameForReadableName() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/report.pdf", name: "report.pdf", kind: .file,
+      fileExtension: "pdf")
+    let suggestion = ModelFilenameSuggestion(
+      itemID: item.id, suggestedBaseName: "Annual Report 2026", reason: "document title")
+
+    let result = await FilenameSuggestionPipeline(
+      extractor: FilenameTestExtractor(text: "Annual Report 2026"),
+      provider: FilenameTestProvider(available: true, suggestions: [suggestion])
+    ).run(sessionID: sessionID, items: [item], requestedItemIDs: [item.id])
+
+    #expect(try #require(result.proposals.first).suggestedBaseName == "Annual Report 2026")
   }
 }

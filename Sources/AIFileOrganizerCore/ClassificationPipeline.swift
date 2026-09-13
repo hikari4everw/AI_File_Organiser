@@ -4,13 +4,16 @@ public struct ClassificationPipelineResult: Sendable {
   public var proposals: [ClassificationProposal]
   public var folderProposals: [FolderProposal]
   public var modelStatus: String
+  public var contextsByItem: [UUID: ItemContext]
 
   public init(
-    proposals: [ClassificationProposal], folderProposals: [FolderProposal], modelStatus: String
+    proposals: [ClassificationProposal], folderProposals: [FolderProposal], modelStatus: String,
+    contextsByItem: [UUID: ItemContext] = [:]
   ) {
     self.proposals = proposals
     self.folderProposals = folderProposals
     self.modelStatus = modelStatus
+    self.contextsByItem = contextsByItem
   }
 }
 
@@ -60,6 +63,7 @@ public struct ClassificationPipeline: Sendable {
     var final: [UUID: ClassificationProposal] = [:]
     var candidatesByItem: [UUID: [RankedCandidate]] = [:]
     var ambiguous: [ItemContext] = []
+    var contextsByItem: [UUID: ItemContext] = [:]
     let validDestinationIDs = Set(destinations.filter { $0.kind == .category }.map(\.id))
     let ruleEngine = RuleEngine()
 
@@ -70,6 +74,7 @@ public struct ClassificationPipeline: Sendable {
     for (index, item) in items.enumerated() {
       if Task.isCancelled { break }
       let basic = classifier.context(for: item)
+      contextsByItem[item.id] = basic
       let basicRule = ruleEngine.evaluate(item: basic, rules: rules)
       if case .matchedMove(let ruleID, let destinationID) = basicRule,
         validDestinationIDs.contains(destinationID)
@@ -118,6 +123,7 @@ public struct ClassificationPipeline: Sendable {
           extracted: extracted,
           directorySummary: summary
         )
+        contextsByItem[item.id] = enriched
         let enrichedRule = ruleEngine.evaluate(item: enriched, rules: rules)
         if case .matchedMove(let ruleID, let destinationID) = enrichedRule,
           validDestinationIDs.contains(destinationID)
@@ -263,7 +269,8 @@ public struct ClassificationPipeline: Sendable {
     let proposals = items.compactMap { final[$0.id] }
     let folderProposals = Self.coalesceFolderProposals(sessionID: sessionID, proposals: proposals)
     return ClassificationPipelineResult(
-      proposals: proposals, folderProposals: folderProposals, modelStatus: modelStatus)
+      proposals: proposals, folderProposals: folderProposals, modelStatus: modelStatus,
+      contextsByItem: contextsByItem)
   }
 
   private static func ruleProposal(
