@@ -18,6 +18,11 @@ public struct FilenameValidator: Sendable {
     else {
       throw OrganizerError.invalidFilename("文件名包含非法字符")
     }
+    if item.kind == .file, !item.fileExtension.isEmpty,
+      baseName.lowercased().hasSuffix("." + item.fileExtension.lowercased())
+    {
+      throw OrganizerError.invalidFilename("请勿在主文件名中输入扩展名")
+    }
     let fullName: String
     if item.kind == .file, !item.fileExtension.isEmpty {
       fullName = baseName + "." + item.fileExtension

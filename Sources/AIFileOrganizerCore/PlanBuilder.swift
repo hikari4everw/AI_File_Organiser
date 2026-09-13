@@ -9,11 +9,15 @@ public struct PlanBuilder: Sendable {
     items: [ItemSnapshot],
     destinations: [DestinationProfile],
     proposals: [ClassificationProposal],
-    folderProposals: [FolderProposal]
+    folderProposals: [FolderProposal],
+    renameProposals: [RenameProposal] = []
   ) throws -> OrganizationPlan {
     let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
     let itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
     let destinationsByID = Dictionary(uniqueKeysWithValues: destinations.map { ($0.id, $0) })
+    let renamesByItem = Dictionary(uniqueKeysWithValues: renameProposals.compactMap { proposal in
+      proposal.selectedBaseName == nil ? nil : (proposal.itemID, proposal)
+    })
     var operations: [PlannedOperation] = []
     var handledItems: Set<UUID> = []
     var sequence = 0
@@ -47,7 +51,8 @@ public struct PlanBuilder: Sendable {
             destinationDirectory: destination,
             sequence: sequence,
             destinationID: DestinationIndexer().identifier(for: name),
-            confirmation: .userApproved
+            confirmation: .userApproved,
+            rename: renamesByItem[item.id]
           ))
         sequence += 1
         handledItems.insert(itemID)
@@ -71,10 +76,35 @@ public struct PlanBuilder: Sendable {
           sequence: sequence,
           destinationID: destinationID,
           confirmation: proposal.source == .user || proposal.status == .approved
-            || proposal.status == .overridden ? .userApproved : .acceptedSuggestion
+            || proposal.status == .overridden ? .userApproved : .acceptedSuggestion,
+          rename: renamesByItem[item.id]
         ))
       sequence += 1
       handledItems.insert(item.id)
+    }
+
+    for item in items where !handledItems.contains(item.id) {
+      guard let rename = renamesByItem[item.id], let baseName = rename.selectedBaseName else {
+        continue
+      }
+      let fullName = try FilenameValidator().validatedFullName(baseName: baseName, item: item)
+      guard PathSafety.normalizedCollisionKey(fullName) != PathSafety.normalizedCollisionKey(item.name)
+      else { continue }
+      let source = URL(fileURLWithPath: item.path)
+      let destination = source.deletingLastPathComponent().appendingPathComponent(fullName)
+      let operationID = UUID()
+      operations.append(PlannedOperation(
+        id: operationID,
+        sequence: sequence,
+        kind: .rename,
+        sourcePath: source.path,
+        destinationPath: destination.path,
+        itemID: item.id,
+        preSnapshot: try FileSnapshot.capture(source),
+        namingDecisionFeatures: namingFeatures(item: item, fullName: fullName, rename: rename),
+        namingSampleSource: namingSource(rename)
+      ))
+      sequence += 1
     }
 
     return OrganizationPlan(sessionID: sessionID, operations: operations)
@@ -85,17 +115,24 @@ public struct PlanBuilder: Sendable {
     destinationDirectory: URL,
     sequence: Int,
     destinationID: UUID? = nil,
-    confirmation: LearningConfirmation? = nil
+    confirmation: LearningConfirmation? = nil,
+    rename: RenameProposal? = nil
   ) throws
     -> PlannedOperation
   {
     let source = URL(fileURLWithPath: item.path)
     let snapshot = try FileSnapshot.capture(source)
+    let fullName: String
+    if let rename, let baseName = rename.selectedBaseName {
+      fullName = try FilenameValidator().validatedFullName(baseName: baseName, item: item)
+    } else {
+      fullName = item.name
+    }
     return PlannedOperation(
       sequence: sequence,
       kind: .move,
       sourcePath: source.path,
-      destinationPath: destinationDirectory.appendingPathComponent(item.name).path,
+      destinationPath: destinationDirectory.appendingPathComponent(fullName).path,
       itemID: item.id,
       preSnapshot: snapshot,
       destinationID: destinationID,
@@ -104,8 +141,33 @@ public struct PlanBuilder: Sendable {
         fileExtension: item.fileExtension,
         keywords: KeywordTokenizer.tokens(from: item.name)
       ),
-      learningConfirmation: confirmation
+      learningConfirmation: confirmation,
+      namingDecisionFeatures: rename.map { namingFeatures(item: item, fullName: fullName, rename: $0) },
+      namingSampleSource: rename.map(namingSource)
     )
+  }
+
+  private func namingFeatures(
+    item: ItemSnapshot, fullName: String, rename: RenameProposal
+  ) -> NamingDecisionFeatures {
+    let originalBase = item.kind == .file
+      ? URL(fileURLWithPath: item.name).deletingPathExtension().lastPathComponent : item.name
+    let finalBase = item.kind == .file
+      ? URL(fileURLWithPath: fullName).deletingPathExtension().lastPathComponent : fullName
+    return NamingDecisionFeatures(
+      itemKind: item.kind,
+      fileExtension: item.fileExtension,
+      originalBaseName: originalBase,
+      finalBaseName: finalBase,
+      templatePattern: rename.templatePattern)
+  }
+
+  private func namingSource(_ rename: RenameProposal) -> NamingSampleSource {
+    switch rename.source {
+    case .namingRule: .namingRule
+    case .foundationModel: .acceptedSuggestion
+    case .user: .userApproved
+    }
   }
 }
 

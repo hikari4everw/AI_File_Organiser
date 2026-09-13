@@ -43,11 +43,15 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
           ))
       }
       let destination = URL(fileURLWithPath: operation.destinationPath)
-      guard PathSafety.contains(library, destination) else {
-        issues.append(.init(operationID: operation.id, message: "目标超出资料库：\(destination.path)"))
+      let destinationIsAllowed = operation.kind == .rename
+        ? PathSafety.isDirectChild(destination, of: inbox)
+        : PathSafety.contains(library, destination)
+      guard destinationIsAllowed else {
+        let message = operation.kind == .rename ? "改名目标必须位于收件箱直接子项" : "目标超出资料库：\(destination.path)"
+        issues.append(.init(operationID: operation.id, message: message))
         continue
       }
-      if !destinations.insert(PathSafety.normalized(destination).path).inserted {
+      if !destinations.insert(PathSafety.normalizedCollisionKey(destination)).inserted {
         issues.append(
           .init(operationID: operation.id, message: "计划内存在重复目标：\(destination.lastPathComponent)"))
       }
@@ -76,7 +80,9 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
           && operation.preSnapshot?.matches(destination) == true
           && (persistedStates[operation.id] == .running
             || persistedStates[operation.id] == .completed)
-        if fileManager.fileExists(atPath: destination.path), !isRecoveredMove {
+        if (fileManager.fileExists(atPath: destination.path)
+          || hasSiblingCollision(at: destination, excluding: source)), !isRecoveredMove
+        {
           issues.append(
             .init(operationID: operation.id, message: "目标已存在：\(destination.lastPathComponent)"))
         }
@@ -100,6 +106,34 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
           || snapshot.volumeIdentifier != workspace.libraryVolumeID
         {
           issues.append(.init(operationID: operation.id, message: "V2.0 不支持跨卷移动"))
+        }
+      case .rename:
+        guard let sourcePath = operation.sourcePath else {
+          issues.append(.init(operationID: operation.id, message: "改名操作缺少源文件"))
+          continue
+        }
+        let source = URL(fileURLWithPath: sourcePath)
+        if !PathSafety.isDirectChild(source, of: inbox) {
+          issues.append(.init(operationID: operation.id, message: "源文件不是收件箱直接子项"))
+        }
+        let isRecoveredRename =
+          !fileManager.fileExists(atPath: source.path)
+          && operation.preSnapshot?.matches(destination) == true
+          && (persistedStates[operation.id] == .running
+            || persistedStates[operation.id] == .completed)
+        if (fileManager.fileExists(atPath: destination.path)
+          || hasSiblingCollision(at: destination, excluding: source)), !isRecoveredRename
+        {
+          issues.append(.init(operationID: operation.id, message: "目标已存在：\(destination.lastPathComponent)"))
+        }
+        guard let snapshot = operation.preSnapshot,
+          snapshot.matches(source) || isRecoveredRename
+        else {
+          issues.append(.init(operationID: operation.id, message: "源文件在方案生成后发生变化"))
+          continue
+        }
+        if snapshot.volumeIdentifier != workspace.inboxVolumeID {
+          issues.append(.init(operationID: operation.id, message: "改名操作必须保持在同一卷"))
         }
       }
     }
@@ -136,7 +170,8 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
               try database.finishOperation(
                 operation.id,
                 state: .completed,
-                learningSample: learningSample(for: operation, sessionID: plan.sessionID)
+                learningSample: learningSample(for: operation, sessionID: plan.sessionID),
+                namingSample: namingSample(for: operation, sessionID: plan.sessionID)
               )
               continuation.yield(.operationFinished(result))
               continue
@@ -148,7 +183,9 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
               state: result.state,
               error: result.error,
               learningSample: result.state == .completed
-                ? learningSample(for: operation, sessionID: plan.sessionID) : nil
+                ? learningSample(for: operation, sessionID: plan.sessionID) : nil,
+              namingSample: result.state == .completed
+                ? namingSample(for: operation, sessionID: plan.sessionID) : nil
             )
             results.append(result)
             try database.saveReceipt(
@@ -262,7 +299,7 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
           }
           return .init(operationID: operation.id, state: .failed, error: error.localizedDescription)
         }
-      case .move:
+      case .move, .rename:
         guard let sourcePath = operation.sourcePath else {
           return .init(operationID: operation.id, state: .failed, error: "缺少源文件")
         }
@@ -308,10 +345,28 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
     )
   }
 
+  private func namingSample(for operation: PlannedOperation, sessionID: UUID) -> NamingSample? {
+    guard let features = operation.namingDecisionFeatures,
+      let source = operation.namingSampleSource
+    else { return nil }
+    let identity = operation.preSnapshot?.resourceIdentifier
+      ?? operation.itemID?.uuidString
+      ?? operation.sourcePath
+      ?? operation.id.uuidString
+    return NamingSample(
+      workspaceID: workspace.id,
+      sessionID: sessionID,
+      operationID: operation.id,
+      itemIdentity: identity,
+      destinationID: operation.destinationID,
+      source: source,
+      features: features)
+  }
+
   private func revert(_ operation: PlannedOperation) -> OperationResult {
     do {
       switch operation.kind {
-      case .move:
+      case .move, .rename:
         guard let sourcePath = operation.sourcePath else {
           return .init(operationID: operation.id, state: .blocked, error: "缺少原始位置")
         }
@@ -334,6 +389,20 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
       return .init(operationID: operation.id, state: .undone)
     } catch {
       return .init(operationID: operation.id, state: .blocked, error: error.localizedDescription)
+    }
+  }
+
+  private func hasSiblingCollision(at destination: URL, excluding source: URL) -> Bool {
+    let parent = destination.deletingLastPathComponent()
+    guard let children = try? fileManager.contentsOfDirectory(
+      at: parent, includingPropertiesForKeys: nil,
+      options: [.skipsSubdirectoryDescendants])
+    else { return false }
+    let desired = PathSafety.normalizedCollisionKey(destination.lastPathComponent)
+    let sourcePath = PathSafety.normalized(source).path
+    return children.contains {
+      PathSafety.normalized($0).path != sourcePath
+        && PathSafety.normalizedCollisionKey($0.lastPathComponent) == desired
     }
   }
 }

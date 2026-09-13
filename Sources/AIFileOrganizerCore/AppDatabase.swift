@@ -468,38 +468,57 @@ public final class AppDatabase: @unchecked Sendable {
     _ id: UUID,
     state: OperationState,
     error: String? = nil,
-    learningSample: LearningSample? = nil
+    learningSample: LearningSample? = nil,
+    namingSample: NamingSample? = nil
   ) throws {
     let samplePayload = try learningSample.map(encode)
+    let namingPayload = try namingSample.map(encode)
     try queue.write { db in
       try db.execute(
         sql: "UPDATE operations SET state = ?, error = ?, updated_at = ? WHERE id = ?",
         arguments: [state.rawValue, error, Date(), id.uuidString])
-      guard let sample = learningSample, let payload = samplePayload else { return }
-      try db.execute(
-        sql: """
-          INSERT INTO learning_events (id, operation_id, state, payload_json)
-          VALUES (?, ?, 'active', ?)
-          ON CONFLICT(operation_id) DO UPDATE SET state = 'active', payload_json = excluded.payload_json
-          """,
-        arguments: [UUID().uuidString, id.uuidString, payload])
-      try db.execute(
-        sql: """
-          INSERT INTO learning_samples
-          (id, library_id, operation_id, item_identity, destination_id, is_active, payload_json, created_at)
-          VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-          ON CONFLICT(operation_id) DO UPDATE SET
-          library_id = excluded.library_id,
-          item_identity = excluded.item_identity,
-          destination_id = excluded.destination_id,
-          is_active = 1,
-          payload_json = excluded.payload_json,
-          created_at = excluded.created_at
-          """,
-        arguments: [
-          sample.id.uuidString, sample.libraryID.uuidString, id.uuidString,
-          sample.itemIdentity, sample.destinationID.uuidString, payload, sample.createdAt,
-        ])
+      if let sample = learningSample, let payload = samplePayload {
+        try db.execute(
+          sql: """
+            INSERT INTO learning_events (id, operation_id, state, payload_json)
+            VALUES (?, ?, 'active', ?)
+            ON CONFLICT(operation_id) DO UPDATE SET state = 'active', payload_json = excluded.payload_json
+            """,
+          arguments: [UUID().uuidString, id.uuidString, payload])
+        try db.execute(
+          sql: """
+            INSERT INTO learning_samples
+            (id, library_id, operation_id, item_identity, destination_id, is_active, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(operation_id) DO UPDATE SET
+            library_id = excluded.library_id,
+            item_identity = excluded.item_identity,
+            destination_id = excluded.destination_id,
+            is_active = 1,
+            payload_json = excluded.payload_json,
+            created_at = excluded.created_at
+            """,
+          arguments: [
+            sample.id.uuidString, sample.libraryID.uuidString, id.uuidString,
+            sample.itemIdentity, sample.destinationID.uuidString, payload, sample.createdAt,
+          ])
+      }
+      if let sample = namingSample, let payload = namingPayload {
+        try db.execute(
+          sql: """
+            INSERT INTO naming_samples
+            (id, workspace_id, session_id, operation_id, item_identity, destination_id,
+             source, is_active, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(operation_id) DO UPDATE SET
+            is_active = 1, payload_json = excluded.payload_json, created_at = excluded.created_at
+            """,
+          arguments: [
+            sample.id.uuidString, sample.workspaceID.uuidString, sample.sessionID.uuidString,
+            id.uuidString, sample.itemIdentity, sample.destinationID?.uuidString,
+            sample.source.rawValue, payload, sample.createdAt,
+          ])
+      }
     }
   }
 
@@ -509,19 +528,30 @@ public final class AppDatabase: @unchecked Sendable {
       try db.execute(
         sql: "UPDATE operations SET state = ?, error = ?, updated_at = ? WHERE id = ?",
         arguments: [persistedState.rawValue, result.error, Date(), id.uuidString])
-      guard result.state == .undone,
-        let data: Data = try Data.fetchOne(
-          db, sql: "SELECT payload_json FROM learning_samples WHERE operation_id = ?",
-          arguments: [id.uuidString])
-      else { return }
-      var sample = try decode(LearningSample.self, from: data)
-      sample.isActive = false
-      try db.execute(
-        sql: "UPDATE learning_samples SET is_active = 0, payload_json = ? WHERE operation_id = ?",
-        arguments: [try encode(sample), id.uuidString])
-      try db.execute(
-        sql: "UPDATE learning_events SET state = 'retracted' WHERE operation_id = ?",
+      guard result.state == .undone else { return }
+      if let data: Data = try Data.fetchOne(
+        db, sql: "SELECT payload_json FROM learning_samples WHERE operation_id = ?",
         arguments: [id.uuidString])
+      {
+        var sample = try decode(LearningSample.self, from: data)
+        sample.isActive = false
+        try db.execute(
+          sql: "UPDATE learning_samples SET is_active = 0, payload_json = ? WHERE operation_id = ?",
+          arguments: [try encode(sample), id.uuidString])
+        try db.execute(
+          sql: "UPDATE learning_events SET state = 'retracted' WHERE operation_id = ?",
+          arguments: [id.uuidString])
+      }
+      if let data: Data = try Data.fetchOne(
+        db, sql: "SELECT payload_json FROM naming_samples WHERE operation_id = ?",
+        arguments: [id.uuidString])
+      {
+        var sample = try decode(NamingSample.self, from: data)
+        sample.isActive = false
+        try db.execute(
+          sql: "UPDATE naming_samples SET is_active = 0, payload_json = ? WHERE operation_id = ?",
+          arguments: [try encode(sample), id.uuidString])
+      }
     }
   }
 

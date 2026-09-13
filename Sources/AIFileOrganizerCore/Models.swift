@@ -34,7 +34,7 @@ public enum FolderProposalStatus: String, Codable, Sendable {
 }
 
 public enum OperationKind: String, Codable, Sendable {
-  case createDirectory, move
+  case createDirectory, move, rename
 }
 
 public enum OperationState: String, Codable, Sendable {
@@ -428,13 +428,17 @@ public struct PlannedOperation: Codable, Hashable, Identifiable, Sendable {
   public var destinationID: UUID?
   public var decisionFeatures: DecisionFeatures?
   public var learningConfirmation: LearningConfirmation?
+  public var namingDecisionFeatures: NamingDecisionFeatures?
+  public var namingSampleSource: NamingSampleSource?
 
   public init(
     id: UUID = UUID(), sequence: Int, kind: OperationKind, sourcePath: String? = nil,
     destinationPath: String, itemID: UUID? = nil, preSnapshot: FileSnapshot? = nil,
     createdByApp: Bool = false, destinationID: UUID? = nil,
     decisionFeatures: DecisionFeatures? = nil,
-    learningConfirmation: LearningConfirmation? = nil
+    learningConfirmation: LearningConfirmation? = nil,
+    namingDecisionFeatures: NamingDecisionFeatures? = nil,
+    namingSampleSource: NamingSampleSource? = nil
   ) {
     self.id = id
     self.sequence = sequence
@@ -447,11 +451,14 @@ public struct PlannedOperation: Codable, Hashable, Identifiable, Sendable {
     self.destinationID = destinationID
     self.decisionFeatures = decisionFeatures
     self.learningConfirmation = learningConfirmation
+    self.namingDecisionFeatures = namingDecisionFeatures
+    self.namingSampleSource = namingSampleSource
   }
 
   private enum CodingKeys: String, CodingKey {
     case id, sequence, kind, sourcePath, destinationPath, itemID, preSnapshot, createdByApp
-    case destinationID, decisionFeatures, learningConfirmation
+    case destinationID, decisionFeatures, learningConfirmation, namingDecisionFeatures,
+      namingSampleSource
   }
 
   public init(from decoder: Decoder) throws {
@@ -468,6 +475,10 @@ public struct PlannedOperation: Codable, Hashable, Identifiable, Sendable {
     decisionFeatures = try values.decodeIfPresent(DecisionFeatures.self, forKey: .decisionFeatures)
     learningConfirmation = try values.decodeIfPresent(
       LearningConfirmation.self, forKey: .learningConfirmation)
+    namingDecisionFeatures = try values.decodeIfPresent(
+      NamingDecisionFeatures.self, forKey: .namingDecisionFeatures)
+    namingSampleSource = try values.decodeIfPresent(
+      NamingSampleSource.self, forKey: .namingSampleSource)
   }
 }
 

@@ -11,6 +11,114 @@ private actor ExecutionProgressRecorder {
 }
 
 @Suite struct ExecutorTests {
+  @Test func planCombinesMoveAndRenameIntoOneAtomicOperation() throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("hash.pdf")
+    try Data("Annual Report".utf8).write(to: source)
+    let item = ItemSnapshot(
+      sessionID: fixture.sessionID, path: source.path, name: source.lastPathComponent,
+      kind: .file, fileExtension: "pdf")
+    let destination = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let move = ClassificationProposal(
+      sessionID: fixture.sessionID, itemID: item.id, action: .move,
+      destinationID: destination.id, source: .user, reviewDecision: .ready,
+      status: .approved, reason: "user")
+    let rename = RenameProposal(
+      sessionID: fixture.sessionID, itemID: item.id, originalName: item.name,
+      suggestedBaseName: "Annual Report", source: .foundationModel,
+      disposition: .approved, reason: "title")
+
+    let plan = try PlanBuilder().build(
+      sessionID: fixture.sessionID, workspace: fixture.workspace, items: [item],
+      destinations: [destination], proposals: [move], folderProposals: [],
+      renameProposals: [rename])
+
+    #expect(plan.operations.count == 1)
+    #expect(plan.operations[0].kind == .move)
+    #expect(plan.operations[0].destinationPath == fixture.docs.appendingPathComponent("Annual Report.pdf").path)
+    #expect(plan.operations[0].namingDecisionFeatures?.originalBaseName == "hash")
+    #expect(plan.operations[0].namingDecisionFeatures?.finalBaseName == "Annual Report")
+  }
+
+  @Test func planCreatesRenameOnlyOperationForKeptItem() throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("hash.txt")
+    try Data("Notes".utf8).write(to: source)
+    let item = ItemSnapshot(
+      sessionID: fixture.sessionID, path: source.path, name: source.lastPathComponent,
+      kind: .file, fileExtension: "txt")
+    let keep = ClassificationProposal(
+      sessionID: fixture.sessionID, itemID: item.id, action: .keep,
+      source: .user, reviewDecision: .keep, reason: "keep")
+    let rename = RenameProposal(
+      sessionID: fixture.sessionID, itemID: item.id, originalName: item.name,
+      suggestedBaseName: "Meeting Notes", source: .user,
+      disposition: .edited, reason: "user")
+
+    let plan = try PlanBuilder().build(
+      sessionID: fixture.sessionID, workspace: fixture.workspace, items: [item],
+      destinations: [], proposals: [keep], folderProposals: [], renameProposals: [rename])
+
+    #expect(plan.operations.count == 1)
+    #expect(plan.operations[0].kind == .rename)
+    #expect(plan.operations[0].destinationPath == fixture.inbox.appendingPathComponent("Meeting Notes.txt").path)
+  }
+
+  @Test func executeAndUndoRenameOnlyAlsoRetractsNamingLearning() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("hash.txt")
+    try Data("Notes".utf8).write(to: source)
+    let item = ItemSnapshot(
+      sessionID: fixture.sessionID, path: source.path, name: source.lastPathComponent,
+      kind: .file, fileExtension: "txt")
+    let rename = RenameProposal(
+      sessionID: fixture.sessionID, itemID: item.id, originalName: item.name,
+      suggestedBaseName: "Meeting Notes", source: .user,
+      disposition: .edited, reason: "user")
+    let plan = try PlanBuilder().build(
+      sessionID: fixture.sessionID, workspace: fixture.workspace, items: [item],
+      destinations: [], proposals: [], folderProposals: [], renameProposals: [rename])
+    let executor = SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)
+
+    var receipt: ExecutionReceipt?
+    for try await event in executor.execute(plan) {
+      if case .finished(let value) = event { receipt = value }
+    }
+
+    let renamed = fixture.inbox.appendingPathComponent("Meeting Notes.txt")
+    #expect(FileManager.default.fileExists(atPath: renamed.path))
+    #expect(!FileManager.default.fileExists(atPath: source.path))
+    #expect(try NamingLearningService(database: fixture.database)
+      .activeSamples(workspaceID: fixture.workspace.id).count == 1)
+
+    for try await _ in executor.undo(plan: plan, receipt: try #require(receipt)) {}
+
+    #expect(FileManager.default.fileExists(atPath: source.path))
+    #expect(!FileManager.default.fileExists(atPath: renamed.path))
+    #expect(try NamingLearningService(database: fixture.database)
+      .activeSamples(workspaceID: fixture.workspace.id).isEmpty)
+  }
+
+  @Test func renamePreflightBlocksCaseInsensitiveSiblingCollision() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("source.txt")
+    try Data("source".utf8).write(to: source)
+    try Data("occupied".utf8).write(to: fixture.inbox.appendingPathComponent("REPORT.txt"))
+    let operation = PlannedOperation(
+      sequence: 0, kind: .rename, sourcePath: source.path,
+      destinationPath: fixture.inbox.appendingPathComponent("report.txt").path,
+      preSnapshot: try .capture(source))
+
+    let report = await SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)
+      .preflight(OrganizationPlan(sessionID: fixture.sessionID, operations: [operation]))
+
+    #expect(!report.isReady)
+    #expect(report.issues.contains { $0.message.contains("目标已存在") })
+  }
   @Test func executeAndUndoMoveWithoutOverwrite() async throws {
     let fixture = try makeFixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }

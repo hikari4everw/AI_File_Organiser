@@ -109,6 +109,7 @@ public struct RenameProposal: Codable, Hashable, Identifiable, Sendable {
   public var source: RenameProposalSource
   public var disposition: RenameDisposition
   public var ruleID: UUID?
+  public var templatePattern: String?
   public var missingFields: [FilenameField]
   public var reason: String
 
@@ -116,7 +117,7 @@ public struct RenameProposal: Codable, Hashable, Identifiable, Sendable {
     id: UUID = UUID(), sessionID: UUID, itemID: UUID, originalName: String,
     suggestedBaseName: String, editedBaseName: String? = nil, source: RenameProposalSource,
     disposition: RenameDisposition = .pending, ruleID: UUID? = nil,
-    missingFields: [FilenameField] = [], reason: String
+    templatePattern: String? = nil, missingFields: [FilenameField] = [], reason: String
   ) {
     self.id = id
     self.sessionID = sessionID
@@ -127,6 +128,7 @@ public struct RenameProposal: Codable, Hashable, Identifiable, Sendable {
     self.source = source
     self.disposition = disposition
     self.ruleID = ruleID
+    self.templatePattern = templatePattern
     self.missingFields = missingFields
     self.reason = reason
   }

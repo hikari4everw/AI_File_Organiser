@@ -78,4 +78,13 @@ public enum PathSafety {
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
   }
+
+  public static func normalizedCollisionKey(_ value: String) -> String {
+    value.precomposedStringWithCanonicalMapping
+      .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+  }
+
+  public static func normalizedCollisionKey(_ url: URL) -> String {
+    normalizedCollisionKey(normalized(url).path)
+  }
 }

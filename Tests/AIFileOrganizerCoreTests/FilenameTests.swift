@@ -59,6 +59,16 @@ private struct FilenameTestProvider: FilenameSuggestionProvider {
     #expect(result == "Café.PDF")
   }
 
+  @Test func validatorRejectsCandidateThatInjectsLockedExtension() {
+    let item = ItemSnapshot(
+      sessionID: UUID(), path: "/tmp/source.pdf", name: "source.pdf", kind: .file,
+      fileExtension: "pdf")
+
+    #expect(throws: OrganizerError.self) {
+      try FilenameValidator().validatedFullName(baseName: "renamed.pdf", item: item)
+    }
+  }
+
   @Test func validatorTreatsDirectoryNameAsCompleteName() throws {
     let item = ItemSnapshot(
       sessionID: UUID(), path: "/tmp/Comic.old", name: "Comic.old", kind: .directory)
