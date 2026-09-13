@@ -9,6 +9,7 @@ public enum OrganizerError: LocalizedError, Sendable {
   case modelUnavailable(String)
   case invalidModelOutput(String)
   case invalidFolderName(String)
+  case invalidFilename(String)
   case planBlocked([String])
   case operationFailed(String)
   case persistenceFailed(String)
@@ -19,6 +20,7 @@ public enum OrganizerError: LocalizedError, Sendable {
       .bookmarkResolutionFailed(let message), .accessDenied(let message),
       .scanFailed(let message), .modelUnavailable(let message),
       .invalidModelOutput(let message), .invalidFolderName(let message),
+      .invalidFilename(let message),
       .operationFailed(let message), .persistenceFailed(let message):
       message
     case .planBlocked(let messages):
