@@ -65,6 +65,9 @@ public struct FilenameSuggestionPipeline: Sendable {
     var requests: [FilenameSuggestionRequest] = []
     for context in candidateContexts where !context.snapshot.isCloudPlaceholder {
       let existing = byItem[context.id]
+      let hasConflictingRules = existing?.source == .namingRule
+        && existing?.disposition == .blocked && existing?.ruleID == nil
+      guard !hasConflictingRules else { continue }
       let needsModel = automaticIDs.contains(context.id) || requestedItemIDs.contains(context.id)
         || existing?.disposition == .blocked
       guard needsModel else { continue }
@@ -90,17 +93,22 @@ public struct FilenameSuggestionPipeline: Sendable {
           guard let request = allowed[output.itemID] else { continue }
           let item = request.context.snapshot
           let baseName: String
+          let fields = deterministicFields(request.context)
+            .merging(
+              verifiedFields(output.fields, context: request.context),
+              uniquingKeysWith: { _, verified in verified })
           var missing: [FilenameField] = []
+          let templatePattern: String?
           if let template = request.template {
-            let fields = verifiedFields(output.fields, context: request.context)
-              .merging(deterministicFields(request.context), uniquingKeysWith: { model, _ in model })
             guard let rendered = try? FilenameTemplateEngine().render(
               template: template, fields: fields)
             else { continue }
             baseName = rendered.missingFields.isEmpty ? rendered.value : originalBaseName(item)
             missing = rendered.missingFields
+            templatePattern = template.pattern
           } else {
             baseName = output.suggestedBaseName
+            templatePattern = inferredTemplatePattern(baseName: baseName, fields: fields)
           }
           guard missing.isEmpty,
             let fullName = try? FilenameValidator().validatedFullName(baseName: baseName, item: item),
@@ -114,7 +122,7 @@ public struct FilenameSuggestionPipeline: Sendable {
             source: request.ruleID == nil ? .foundationModel : .namingRule,
             disposition: request.ruleID == nil ? .pending : .selectedByRule,
             ruleID: request.ruleID,
-            templatePattern: request.template?.pattern,
+            templatePattern: templatePattern,
             reason: String(output.reason.prefix(240))
           )
         }
@@ -163,8 +171,8 @@ public struct FilenameSuggestionPipeline: Sendable {
       context.spotlightAuthors.joined(separator: " "), context.extracted.text,
     ].joined(separator: " "))
     return fields.filter { field, value in
-      field == .date || field == .originalTitle
-        || evidence.contains(RuleCondition.normalize(value))
+      field != .date && field != .originalTitle
+        && evidence.contains(RuleCondition.normalize(value))
     }
   }
 
@@ -172,6 +180,24 @@ public struct FilenameSuggestionPipeline: Sendable {
     item.kind == .file && !item.fileExtension.isEmpty
       ? URL(fileURLWithPath: item.name).deletingPathExtension().lastPathComponent
       : item.name
+  }
+
+  private func inferredTemplatePattern(
+    baseName: String, fields: [FilenameField: String]
+  ) -> String? {
+    let learnableFields: Set<FilenameField> = [.title, .author, .date]
+    let replacements = fields.filter { learnableFields.contains($0.key) && !$0.value.isEmpty }
+      .sorted { $0.value.count > $1.value.count }
+    var pattern = baseName
+    for (field, value) in replacements where pattern.contains(value) {
+      pattern = pattern.replacingOccurrences(of: value, with: "{\(field.placeholder)}")
+    }
+    guard pattern != baseName else { return nil }
+    let template = FilenameTemplate(pattern: pattern)
+    guard let rendered = try? FilenameTemplateEngine().render(template: template, fields: fields),
+      rendered.missingFields.isEmpty, rendered.value == baseName
+    else { return nil }
+    return pattern
   }
 
   private func normalizedKey(_ value: String) -> String {

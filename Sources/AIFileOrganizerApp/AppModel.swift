@@ -69,7 +69,17 @@ final class AppModel: ObservableObject {
         }
       }
       if ProcessInfo.processInfo.arguments.contains("-ui-testing-workspace-demo") {
-        seedWorkspaceDemo(database: database)
+        let renameDisposition: RenameDisposition
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing-blocked-rename-demo") {
+          renameDisposition = .blocked
+        } else if ProcessInfo.processInfo.arguments.contains("-ui-testing-rejected-rename-demo") {
+          renameDisposition = .rejected
+        } else {
+          renameDisposition = .pending
+        }
+        seedWorkspaceDemo(
+          database: database,
+          renameDisposition: renameDisposition)
       }
       if isUITesting {
         modelStatus = "本地 AI 状态将在整理时检查"
@@ -90,7 +100,9 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func seedWorkspaceDemo(database: AppDatabase) {
+  private func seedWorkspaceDemo(
+    database: AppDatabase, renameDisposition: RenameDisposition = .pending
+  ) {
     let workspace = Workspace(
       inboxPath: "/tmp/Downloads",
       libraryPath: "/tmp/Library",
@@ -123,7 +135,8 @@ final class AppModel: ObservableObject {
       originalName: item.name,
       suggestedBaseName: "Moonlight Sonata",
       source: .foundationModel,
-      reason: "从 PDF 标题提取"
+      disposition: renameDisposition,
+      reason: renameDisposition == .blocked ? "多个命名规则给出了不同名称" : "从 PDF 标题提取"
     )
     try? database.saveWorkspace(workspace)
     try? database.saveSession(session)
@@ -761,15 +774,19 @@ final class AppModel: ObservableObject {
 
   func acceptRename(_ proposalID: UUID) {
     guard let index = renameProposals.firstIndex(where: { $0.id == proposalID }) else { return }
-    renameProposals[index].disposition = .approved
-    persistRenameReview(itemID: renameProposals[index].itemID, action: "approve_rename")
+    var proposal = renameProposals[index]
+    proposal.disposition = .approved
+    renameProposals[index] = proposal
+    persistRenameReview(itemID: proposal.itemID, action: "approve_rename")
   }
 
   func rejectRename(_ proposalID: UUID) {
     guard let index = renameProposals.firstIndex(where: { $0.id == proposalID }) else { return }
-    renameProposals[index].disposition = .rejected
-    renameProposals[index].editedBaseName = nil
-    persistRenameReview(itemID: renameProposals[index].itemID, action: "reject_rename")
+    var proposal = renameProposals[index]
+    proposal.disposition = .rejected
+    proposal.editedBaseName = nil
+    renameProposals[index] = proposal
+    persistRenameReview(itemID: proposal.itemID, action: "reject_rename")
   }
 
   func updateRename(_ proposalID: UUID, baseName: String) {
@@ -778,12 +795,18 @@ final class AppModel: ObservableObject {
     else { return }
     do {
       _ = try FilenameValidator().validatedFullName(baseName: baseName, item: item)
-      renameProposals[index].editedBaseName = baseName.trimmingCharacters(
+      var proposal = renameProposals[index]
+      let cleaned = baseName.trimmingCharacters(
         in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
-      renameProposals[index].source = .user
-      renameProposals[index].disposition = .edited
-      renameProposals[index].missingFields = []
-      renameProposals[index].reason = "由你修改文件名"
+      if cleaned != proposal.suggestedBaseName {
+        proposal.templatePattern = nil
+      }
+      proposal.editedBaseName = cleaned
+      proposal.source = .user
+      proposal.disposition = .edited
+      proposal.missingFields = []
+      proposal.reason = "由你修改文件名"
+      renameProposals[index] = proposal
       persistRenameReview(itemID: item.id, action: "edit_rename")
     } catch {
       lastError = error.localizedDescription
@@ -801,7 +824,9 @@ final class AppModel: ObservableObject {
   }
 
   func proposedFullName(for item: ItemSnapshot) -> String? {
-    guard let proposal = renameProposal(for: item.id) else { return nil }
+    guard let proposal = renameProposal(for: item.id),
+      proposal.disposition != .rejected, proposal.disposition != .blocked
+    else { return nil }
     let baseName = proposal.editedBaseName ?? proposal.suggestedBaseName
     return try? FilenameValidator().validatedFullName(baseName: baseName, item: item)
   }

@@ -50,5 +50,34 @@
       app.buttons["历史与撤销"].click()
       XCTAssertTrue(app.staticTexts["历史与撤销"].exists)
     }
+
+    @MainActor
+    func testRejectedRenameShowsOriginalNameState() {
+      let app = XCUIApplication()
+      app.launchArguments = [
+        "-ui-testing-reset", "-ui-testing-workspace-demo", "-ui-testing-rejected-rename-demo",
+        "-ApplePersistenceIgnoreState", "YES",
+      ]
+      app.launch()
+
+      XCTAssertTrue(app.staticTexts["本次保留原名称"].waitForExistence(timeout: 5))
+      XCTAssertFalse(app.buttons["采用建议"].exists)
+      XCTAssertFalse(app.descendants(matching: .any)["rename-row-preview"].exists)
+    }
+
+    @MainActor
+    func testBlockedRenameShowsConflictWithoutFinalNameMapping() {
+      let app = XCUIApplication()
+      app.launchArguments = [
+        "-ui-testing-reset", "-ui-testing-workspace-demo", "-ui-testing-blocked-rename-demo",
+        "-ApplePersistenceIgnoreState", "YES",
+      ]
+      app.launch()
+
+      XCTAssertTrue(app.descendants(matching: .any)["rename-conflict"].waitForExistence(timeout: 5))
+      XCTAssertTrue(app.textFields["rename-editor"].exists)
+      XCTAssertFalse(app.descendants(matching: .any)["rename-preview"].exists)
+      XCTAssertFalse(app.descendants(matching: .any)["rename-row-preview"].exists)
+    }
   }
 #endif

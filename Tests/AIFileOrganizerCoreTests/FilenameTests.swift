@@ -264,4 +264,110 @@ private struct FilenameTestProvider: FilenameSuggestionProvider {
 
     #expect(try #require(result.proposals.first).suggestedBaseName == "Annual Report 2026")
   }
+
+  @Test func pipelineKeepsConflictingNamingRulesBlockedEvenWhenModelSuggestsName() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/source.pdf", name: "source.pdf", kind: .file,
+      fileExtension: "pdf")
+    let first = NamingRule(
+      workspaceID: UUID(), originalText: "A", condition: RuleCondition(fileExtensions: ["pdf"]),
+      template: FilenameTemplate(pattern: "A - {原标题}"))
+    let second = NamingRule(
+      workspaceID: first.workspaceID, originalText: "B",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      template: FilenameTemplate(pattern: "B - {原标题}"))
+    let model = ModelFilenameSuggestion(
+      itemID: item.id, suggestedBaseName: "Model Override", reason: "model")
+
+    let result = await FilenameSuggestionPipeline(
+      extractor: FilenameTestExtractor(text: "Model Override"),
+      provider: FilenameTestProvider(available: true, suggestions: [model])
+    ).run(sessionID: sessionID, items: [item], namingRules: [first, second])
+
+    let proposal = try #require(result.proposals.first)
+    #expect(proposal.disposition == .blocked)
+    #expect(proposal.reason.contains("多个命名规则"))
+  }
+
+  @Test func modelDateCannotFillRuleWithoutDeterministicDateEvidence() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/source.pdf", name: "source.pdf", kind: .file,
+      fileExtension: "pdf", creationDate: nil)
+    let rule = NamingRule(
+      workspaceID: UUID(), originalText: "date", condition: RuleCondition(fileExtensions: ["pdf"]),
+      template: FilenameTemplate(pattern: "{日期} - {原标题}"))
+    let model = ModelFilenameSuggestion(
+      itemID: item.id, suggestedBaseName: "2026-09-14 - source",
+      fields: [.date: "2026-09-14"], reason: "model")
+
+    let result = await FilenameSuggestionPipeline(
+      extractor: FilenameTestExtractor(text: ""),
+      provider: FilenameTestProvider(available: true, suggestions: [model])
+    ).run(sessionID: sessionID, items: [item], namingRules: [rule])
+
+    let proposal = try #require(result.proposals.first)
+    #expect(proposal.disposition == .blocked)
+    #expect(proposal.missingFields == [.date])
+  }
+
+  @Test func evidenceBackedAISuggestionCarriesLearnableTemplate() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/8f14e45fceea167a5a36dedd4bea2543.pdf",
+      name: "8f14e45fceea167a5a36dedd4bea2543.pdf", kind: .file,
+      fileExtension: "pdf")
+    let model = ModelFilenameSuggestion(
+      itemID: item.id, suggestedBaseName: "Beethoven - Moonlight Sonata",
+      fields: [.author: "Beethoven", .title: "Moonlight Sonata"], reason: "model")
+
+    let result = await FilenameSuggestionPipeline(
+      extractor: FilenameTestExtractor(text: "Beethoven Moonlight Sonata"),
+      provider: FilenameTestProvider(available: true, suggestions: [model])
+    ).run(sessionID: sessionID, items: [item])
+
+    #expect(try #require(result.proposals.first).templatePattern == "{作者} - {标题}")
+  }
+
+  @Test func acceptedAISuggestionCarriesTemplateIntoPlanLearningFeatures() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let inbox = root.appendingPathComponent("Inbox")
+    let library = root.appendingPathComponent("Library")
+    let docs = library.appendingPathComponent("Docs")
+    try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sessionID = UUID()
+    let source = inbox.appendingPathComponent("8f14e45fceea167a5a36dedd4bea2543.pdf")
+    try Data("Beethoven Moonlight Sonata".utf8).write(to: source)
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: source.path, name: source.lastPathComponent,
+      kind: .file, fileExtension: "pdf")
+    let output = ModelFilenameSuggestion(
+      itemID: item.id, suggestedBaseName: "Beethoven - Moonlight Sonata",
+      fields: [.author: "Beethoven", .title: "Moonlight Sonata"], reason: "model")
+    let result = await FilenameSuggestionPipeline(
+      extractor: FilenameTestExtractor(text: "Beethoven Moonlight Sonata"),
+      provider: FilenameTestProvider(available: true, suggestions: [output])
+    ).run(sessionID: sessionID, items: [item])
+    var rename = try #require(result.proposals.first)
+    rename.disposition = .approved
+    let destination = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let move = ClassificationProposal(
+      sessionID: sessionID, itemID: item.id, action: .move,
+      destinationID: destination.id, source: .user, reviewDecision: .ready,
+      status: .approved, reason: "user")
+    let workspace = Workspace(
+      inboxPath: inbox.path, libraryPath: library.path,
+      inboxVolumeID: "volume", libraryVolumeID: "volume")
+
+    let plan = try PlanBuilder().build(
+      sessionID: sessionID, workspace: workspace, items: [item],
+      destinations: [destination], proposals: [move], folderProposals: [],
+      renameProposals: [rename])
+
+    #expect(plan.operations.first?.namingDecisionFeatures?.templatePattern == "{作者} - {标题}")
+    #expect(plan.operations.first?.namingSampleSource == .acceptedSuggestion)
+  }
 }

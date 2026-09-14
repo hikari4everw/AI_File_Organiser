@@ -19,8 +19,16 @@ struct RenameReviewView: View {
         Label("应用包不提供改名建议", systemImage: "app.badge.checkmark")
           .font(.callout).foregroundStyle(.secondary)
       } else if let proposal {
-        RenameProposalEditor(model: model, item: item, proposal: proposal)
-          .id(proposal.id.uuidString + proposal.disposition.rawValue)
+        if proposal.disposition == .rejected {
+          Label("本次保留原名称", systemImage: "arrow.uturn.backward.circle")
+            .foregroundStyle(.secondary)
+          Button("重新请求 AI 命名建议") { model.requestFilenameSuggestion(for: item.id) }
+            .disabled(model.isWorking)
+            .accessibilityIdentifier("rename-request-suggestion")
+        } else {
+          RenameProposalEditor(model: model, item: item, proposal: proposal)
+            .id(proposal.id.uuidString + proposal.disposition.rawValue)
+        }
       } else {
         Text("保留原名称。你也可以为这个项目单独请求本地 AI 建议。")
           .font(.callout).foregroundStyle(.secondary)
@@ -49,12 +57,14 @@ private struct RenameProposalEditor: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      VStack(alignment: .leading, spacing: 4) {
-        Text(proposal.originalName).foregroundStyle(.secondary)
-        HStack(spacing: 6) {
-          Image(systemName: "arrow.down").foregroundStyle(.tertiary)
-          Text(previewName).fontWeight(.semibold)
-            .accessibilityIdentifier("rename-preview")
+      if proposal.disposition != .blocked {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(proposal.originalName).foregroundStyle(.secondary)
+          HStack(spacing: 6) {
+            Image(systemName: "arrow.down").foregroundStyle(.tertiary)
+            Text(previewName).fontWeight(.semibold)
+              .accessibilityIdentifier("rename-preview")
+          }
         }
       }
 
