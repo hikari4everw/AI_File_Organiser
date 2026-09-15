@@ -3,17 +3,21 @@ import Foundation
 public struct FilenameSuggestionPipeline: Sendable {
   private let extractor: any ContentExtractor
   private let provider: any FilenameSuggestionProvider
+  private let semanticEvaluator: any SemanticNamingConditionEvaluator
   private let detector: FilenameQualityDetector
   private let directoryAnalyzer: DirectoryAnalyzer
 
   public init(
     extractor: any ContentExtractor = NativeContentExtractor(),
     provider: any FilenameSuggestionProvider = AppleFilenameSuggestionProvider(),
+    semanticEvaluator: any SemanticNamingConditionEvaluator =
+      AppleSemanticNamingConditionEvaluator(),
     detector: FilenameQualityDetector = .init(),
     directoryAnalyzer: DirectoryAnalyzer = .init()
   ) {
     self.extractor = extractor
     self.provider = provider
+    self.semanticEvaluator = semanticEvaluator
     self.detector = detector
     self.directoryAnalyzer = directoryAnalyzer
   }
@@ -57,9 +61,35 @@ public struct FilenameSuggestionPipeline: Sendable {
         isCancellable: true))
     }
 
-    let candidateContexts = eligible.filter { candidateIDs.contains($0.id) }.compactMap { contexts[$0.id] }
-    var byItem = Dictionary(uniqueKeysWithValues: NamingRuleEngine().proposals(
-      sessionID: sessionID, contexts: candidateContexts, rules: namingRules
+    let candidateContexts = eligible.filter { candidateIDs.contains($0.id) }
+      .compactMap { contexts[$0.id] }
+    let ruleEngine = NamingRuleEngine()
+    var semanticEvaluationsByItem: [UUID: [UUID: SemanticNamingConditionEvaluation]] = [:]
+    for context in candidateContexts {
+      for rule in ruleEngine.semanticCandidateRules(context: context, rules: namingRules) {
+        let evaluation: SemanticNamingConditionEvaluation
+        if semanticEvaluator.isAvailable {
+          do {
+            evaluation = try await semanticEvaluator.evaluate(
+              request: FilenameSuggestionRequest(
+                context: context,
+                template: rule.template,
+                semanticCondition: rule.condition.semanticDescription,
+                operations: rule.operations,
+                ruleID: rule.id))
+          } catch {
+            let detail = String(error.localizedDescription.prefix(180))
+            evaluation = .uncertain(reason: "语义判断失败：\(detail)")
+          }
+        } else {
+          evaluation = .uncertain(reason: semanticEvaluator.availabilityDescription)
+        }
+        semanticEvaluationsByItem[context.id, default: [:]][rule.id] = evaluation
+      }
+    }
+    var byItem = Dictionary(uniqueKeysWithValues: ruleEngine.proposals(
+      sessionID: sessionID, contexts: candidateContexts, rules: namingRules,
+      semanticEvaluationsByItem: semanticEvaluationsByItem
     ).map { ($0.itemID, $0) })
 
     var requests: [FilenameSuggestionRequest] = []
@@ -67,15 +97,22 @@ public struct FilenameSuggestionPipeline: Sendable {
       let existing = byItem[context.id]
       let hasConflictingRules = existing?.source == .namingRule
         && existing?.disposition == .blocked && existing?.ruleID == nil
-      guard !hasConflictingRules else { continue }
-      let needsModel = automaticIDs.contains(context.id) || requestedItemIDs.contains(context.id)
-        || existing?.disposition == .blocked
+      let hasUnresolvedSemanticRule = semanticEvaluationsByItem[context.id]?.values.contains {
+        if case .uncertain = $0 { return true }
+        return false
+      } == true
+      guard !hasConflictingRules, !hasUnresolvedSemanticRule else { continue }
+      let needsModel = existing == nil
+        ? automaticIDs.contains(context.id) || requestedItemIDs.contains(context.id)
+        : existing?.disposition == .blocked
       guard needsModel else { continue }
       let rule = existing?.ruleID.flatMap { id in namingRules.first { $0.id == id } }
       let destinationID = destinationByItem[context.id]
       requests.append(FilenameSuggestionRequest(
         context: context,
         template: rule?.template,
+        semanticCondition: rule?.condition.semanticDescription,
+        operations: rule?.operations ?? [],
         styleExamples: destinationID.flatMap { styleExamplesByDestination[$0] } ?? [],
         ruleID: rule?.id
       ))
@@ -99,13 +136,15 @@ public struct FilenameSuggestionPipeline: Sendable {
               uniquingKeysWith: { _, verified in verified })
           var missing: [FilenameField] = []
           let templatePattern: String?
-          if let template = request.template {
-            guard let rendered = try? FilenameTemplateEngine().render(
-              template: template, fields: fields)
+          if !request.operations.isEmpty {
+            guard let rendered = try? NamingOperationEngine().render(
+              operations: request.operations,
+              baseName: originalBaseName(item),
+              fields: fields)
             else { continue }
             baseName = rendered.missingFields.isEmpty ? rendered.value : originalBaseName(item)
             missing = rendered.missingFields
-            templatePattern = template.pattern
+            templatePattern = request.template?.pattern
           } else {
             baseName = output.suggestedBaseName
             templatePattern = inferredTemplatePattern(baseName: baseName, fields: fields)

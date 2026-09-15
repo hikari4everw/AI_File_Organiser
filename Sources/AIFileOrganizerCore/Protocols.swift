@@ -22,6 +22,13 @@ public protocol FilenameSuggestionProvider: Sendable {
     -> [ModelFilenameSuggestion]
 }
 
+public protocol SemanticNamingConditionEvaluator: Sendable {
+  var availabilityDescription: String { get }
+  var isAvailable: Bool { get }
+  func evaluate(request: FilenameSuggestionRequest) async throws
+    -> SemanticNamingConditionEvaluation
+}
+
 public protocol DecisionPolicy: Sendable {
   func evaluate(proposal: ModelProposal, deterministicCandidates: [RankedCandidate])
     -> ReviewDecision

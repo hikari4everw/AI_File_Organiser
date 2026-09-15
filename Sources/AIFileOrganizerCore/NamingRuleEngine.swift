@@ -6,23 +6,43 @@ public struct NamingRuleEngine: Sendable {
   public func proposals(
     sessionID: UUID,
     contexts: [ItemContext],
-    rules: [NamingRule]
+    rules: [NamingRule],
+    semanticEvaluationsByItem: [UUID: [UUID: SemanticNamingConditionEvaluation]] = [:]
   ) -> [RenameProposal] {
     contexts.compactMap { context -> RenameProposal? in
       guard context.snapshot.kind != .applicationBundle else { return nil }
-      let matches = rules.filter {
+      let candidates = rules.filter {
         $0.isEnabled && !$0.operations.isEmpty && conditionMatches($0.condition, context: context)
       }
-      guard !matches.isEmpty else { return nil }
-      if matches.contains(where: { $0.condition.semanticDescription != nil }) {
-        return blockedProposal(
-          sessionID: sessionID, context: context, ruleID: matches.first?.id,
-          reason: "命名规则需要本地 AI 判断")
+      var matches: [NamingRule] = []
+      var unresolved: [(rule: NamingRule, reason: String)] = []
+      for rule in candidates {
+        guard rule.condition.semanticDescription != nil else {
+          matches.append(rule)
+          continue
+        }
+        switch semanticEvaluationsByItem[context.id]?[rule.id] {
+        case .match:
+          matches.append(rule)
+        case .noMatch:
+          continue
+        case .uncertain(let reason):
+          unresolved.append((rule, reason))
+        case nil:
+          unresolved.append((rule, "需要本地 AI 判断"))
+        }
       }
+      if let first = unresolved.first {
+        return blockedProposal(
+          sessionID: sessionID, context: context,
+          ruleID: unresolved.count == 1 ? first.rule.id : nil,
+          reason: "命名规则语义判断不确定：\(first.reason)")
+      }
+      guard !matches.isEmpty else { return nil }
       let fields = fields(for: context)
       let baseName = originalBaseName(context.snapshot)
-      let evaluated: [(rule: NamingRule, result: TemplateRenderResult, fullName: String?)] = matches
-        .compactMap {
+      let evaluated: [(rule: NamingRule, result: TemplateRenderResult, fullName: String?)] =
+        matches.compactMap {
           let result = (try? NamingOperationEngine().render(
             operations: $0.operations,
             baseName: baseName,
@@ -69,6 +89,16 @@ public struct NamingRuleEngine: Sendable {
         templatePattern: first.rule.template.pattern,
         reason: "匹配用户命名规则"
       )
+    }
+  }
+
+  public func semanticCandidateRules(
+    context: ItemContext, rules: [NamingRule]
+  ) -> [NamingRule] {
+    guard context.snapshot.kind != .applicationBundle else { return [] }
+    return rules.filter {
+      $0.isEnabled && !$0.operations.isEmpty && $0.condition.semanticDescription != nil
+        && conditionMatches($0.condition, context: context)
     }
   }
 

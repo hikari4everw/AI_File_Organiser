@@ -53,6 +53,9 @@ import Foundation
             name=\(context.snapshot.name)
             type=\(context.snapshot.contentType ?? "unknown")
             template=\(request.template?.pattern ?? "none")
+            semanticCondition=\(request.semanticCondition ?? "none")
+            orderedOperations=\(
+              request.operations.map(String.init(describing:)).joined(separator: " | "))
             title=\(context.spotlightTitle ?? "")
             authors=\(context.spotlightAuthors.joined(separator: ", "))
             extractedText=\(context.extracted.text.prefix(4000))

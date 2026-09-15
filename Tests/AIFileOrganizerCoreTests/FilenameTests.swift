@@ -23,6 +23,24 @@ private struct FilenameTestProvider: FilenameSuggestionProvider {
   }
 }
 
+private struct FilenameSemanticTestEvaluator: SemanticNamingConditionEvaluator {
+  let available: Bool
+  let availabilityDescription: String
+  let response: @Sendable (FilenameSuggestionRequest) throws -> SemanticNamingConditionEvaluation
+
+  var isAvailable: Bool { available }
+
+  func evaluate(request: FilenameSuggestionRequest) async throws
+    -> SemanticNamingConditionEvaluation
+  {
+    try response(request)
+  }
+}
+
+private enum FilenameSemanticTestError: Error {
+  case rejected
+}
+
 @Suite struct FilenameTests {
   @Test func templateRendersKnownFieldsAndReportsMissingOnes() throws {
     let result = try FilenameTemplateEngine().render(
@@ -263,6 +281,181 @@ private struct FilenameTestProvider: FilenameSuggestionProvider {
     ).run(sessionID: sessionID, items: [item], requestedItemIDs: [item.id])
 
     #expect(try #require(result.proposals.first).suggestedBaseName == "Annual Report 2026")
+  }
+
+  @Test func semanticMatchExecutesTheDoujinshiPrefixOperationInOrder() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/nhentai-651786 - Example.pdf",
+      name: "nhentai-651786 - Example.pdf", kind: .file, fileExtension: "pdf")
+    let context = ItemContext(
+      snapshot: item, normalizedKeywords: [],
+      extracted: ExtractedContext(text: "同人志作品", source: "test", status: .success))
+    let operations: [NamingOperation] = [
+      .removeNumericPrefix(prefix: "nhentai-", suffix: " - "),
+      .replaceLiteral(target: "Example", replacement: "Example Book"),
+    ]
+    let rule = NamingRule(
+      workspaceID: UUID(), originalText: "同人志删除无意义编号前缀",
+      condition: RuleCondition(
+        filenameKeywords: ["nhentai-"], semanticDescription: "同人志"),
+      operations: operations)
+    let evaluator = FilenameSemanticTestEvaluator(
+      available: true, availabilityDescription: "available"
+    ) { request in
+      guard request.semanticCondition == "同人志", request.operations == operations else {
+        return .noMatch(reason: "请求缺少规则语义")
+      }
+      return .match(reason: "内容证据表明这是同人志")
+    }
+
+    let result = await FilenameSuggestionPipeline(semanticEvaluator: evaluator).run(
+      sessionID: sessionID, items: [item], contextsByItem: [item.id: context],
+      namingRules: [rule])
+
+    let proposal = try #require(result.proposals.first)
+    #expect(proposal.suggestedBaseName == "Example Book")
+    #expect(proposal.disposition == .selectedByRule)
+    #expect(proposal.ruleID == rule.id)
+  }
+
+  @Test func semanticNoMatchCreatesNoRuleProposal() async {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/nhentai-651786 - Tax.pdf",
+      name: "nhentai-651786 - Tax.pdf", kind: .file, fileExtension: "pdf")
+    let context = ItemContext(
+      snapshot: item, normalizedKeywords: [],
+      extracted: ExtractedContext(text: "tax report", source: "test", status: .success))
+    let rule = NamingRule(
+      workspaceID: UUID(), originalText: "同人志删除无意义编号前缀",
+      condition: RuleCondition(
+        filenameKeywords: ["nhentai-"], semanticDescription: "同人志"),
+      operations: [.removeNumericPrefix(prefix: "nhentai-", suffix: " - ")])
+
+    let result = await FilenameSuggestionPipeline(
+      semanticEvaluator: FilenameSemanticTestEvaluator(
+        available: true, availabilityDescription: "available",
+        response: { _ in .noMatch(reason: "内容是税务报告") })
+    ).run(
+      sessionID: sessionID, items: [item], contextsByItem: [item.id: context],
+      namingRules: [rule])
+
+    #expect(result.proposals.isEmpty)
+  }
+
+  @Test func semanticUncertainStaysBlockedInsteadOfUsingOrdinaryAISuggestion() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/8f14e45fceea167a5a36dedd4bea2543.pdf",
+      name: "8f14e45fceea167a5a36dedd4bea2543.pdf", kind: .file, fileExtension: "pdf")
+    let context = ItemContext(
+      snapshot: item, normalizedKeywords: [],
+      extracted: ExtractedContext(text: "ambiguous", source: "test", status: .success))
+    let rule = NamingRule(
+      workspaceID: UUID(), originalText: "同人志加前缀",
+      condition: RuleCondition(semanticDescription: "同人志"),
+      operations: [.replaceLiteral(target: "8f14", replacement: "Comic")])
+    let ordinarySuggestion = ModelFilenameSuggestion(
+      itemID: item.id, suggestedBaseName: "Model Override", reason: "ordinary AI")
+
+    let result = await FilenameSuggestionPipeline(
+      provider: FilenameTestProvider(available: true, suggestions: [ordinarySuggestion]),
+      semanticEvaluator: FilenameSemanticTestEvaluator(
+        available: true, availabilityDescription: "available",
+        response: { _ in .uncertain(reason: "证据不足") })
+    ).run(
+      sessionID: sessionID, items: [item], contextsByItem: [item.id: context],
+      namingRules: [rule])
+
+    let proposal = try #require(result.proposals.first)
+    #expect(proposal.disposition == .blocked)
+    #expect(proposal.source == .namingRule)
+    #expect(proposal.suggestedBaseName != "Model Override")
+    #expect(proposal.reason.contains("证据不足"))
+  }
+
+  @Test func unavailableSemanticEvaluatorCreatesBlockedRuleProposal() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/nhentai-651786 - Example.pdf",
+      name: "nhentai-651786 - Example.pdf", kind: .file, fileExtension: "pdf")
+    let context = ItemContext(
+      snapshot: item, normalizedKeywords: [],
+      extracted: ExtractedContext(text: "同人志", source: "test", status: .success))
+    let rule = NamingRule(
+      workspaceID: UUID(), originalText: "同人志删除编号",
+      condition: RuleCondition(semanticDescription: "同人志"),
+      operations: [.removeNumericPrefix(prefix: "nhentai-", suffix: " - ")])
+
+    let result = await FilenameSuggestionPipeline(
+      semanticEvaluator: FilenameSemanticTestEvaluator(
+        available: false, availabilityDescription: "semantic unavailable",
+        response: { _ in .match(reason: "should not run") })
+    ).run(
+      sessionID: sessionID, items: [item], contextsByItem: [item.id: context],
+      namingRules: [rule])
+
+    let proposal = try #require(result.proposals.first)
+    #expect(proposal.disposition == .blocked)
+    #expect(proposal.reason.contains("semantic unavailable"))
+  }
+
+  @Test func rejectedSemanticEvaluationCreatesBlockedRuleProposal() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/nhentai-651786 - Example.pdf",
+      name: "nhentai-651786 - Example.pdf", kind: .file, fileExtension: "pdf")
+    let context = ItemContext(
+      snapshot: item, normalizedKeywords: [],
+      extracted: ExtractedContext(text: "同人志", source: "test", status: .success))
+    let rule = NamingRule(
+      workspaceID: UUID(), originalText: "同人志删除编号",
+      condition: RuleCondition(semanticDescription: "同人志"),
+      operations: [.removeNumericPrefix(prefix: "nhentai-", suffix: " - ")])
+
+    let result = await FilenameSuggestionPipeline(
+      semanticEvaluator: FilenameSemanticTestEvaluator(
+        available: true, availabilityDescription: "available",
+        response: { _ in throw FilenameSemanticTestError.rejected })
+    ).run(
+      sessionID: sessionID, items: [item], contextsByItem: [item.id: context],
+      namingRules: [rule])
+
+    let proposal = try #require(result.proposals.first)
+    #expect(proposal.disposition == .blocked)
+    #expect(proposal.reason.contains("语义判断失败"))
+  }
+
+  @Test func semanticMatchParticipatesInRuleConflictDetection() async throws {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID, path: "/tmp/nhentai-651786 - Example.pdf",
+      name: "nhentai-651786 - Example.pdf", kind: .file, fileExtension: "pdf")
+    let context = ItemContext(
+      snapshot: item, normalizedKeywords: [],
+      extracted: ExtractedContext(text: "同人志", source: "test", status: .success))
+    let semantic = NamingRule(
+      workspaceID: UUID(), originalText: "同人志删除编号",
+      condition: RuleCondition(semanticDescription: "同人志"),
+      operations: [.removeNumericPrefix(prefix: "nhentai-", suffix: " - ")])
+    let deterministic = NamingRule(
+      workspaceID: semantic.workspaceID, originalText: "PDF 加标签",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      operations: [.replaceLiteral(target: "Example", replacement: "Other")])
+
+    let result = await FilenameSuggestionPipeline(
+      semanticEvaluator: FilenameSemanticTestEvaluator(
+        available: true, availabilityDescription: "available",
+        response: { _ in .match(reason: "这是同人志") })
+    ).run(
+      sessionID: sessionID, items: [item], contextsByItem: [item.id: context],
+      namingRules: [semantic, deterministic])
+
+    let proposal = try #require(result.proposals.first)
+    #expect(proposal.disposition == .blocked)
+    #expect(proposal.ruleID == nil)
+    #expect(proposal.reason.contains("多个命名规则"))
   }
 
   @Test func pipelineKeepsConflictingNamingRulesBlockedEvenWhenModelSuggestsName() async throws {

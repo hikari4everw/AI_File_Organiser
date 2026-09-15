@@ -227,17 +227,34 @@ public struct RenameProposal: Codable, Hashable, Identifiable, Sendable {
 public struct FilenameSuggestionRequest: Codable, Hashable, Sendable {
   public var context: ItemContext
   public var template: FilenameTemplate?
+  public var semanticCondition: String?
+  public var operations: [NamingOperation]
   public var styleExamples: [String]
   public var ruleID: UUID?
 
   public init(
-    context: ItemContext, template: FilenameTemplate? = nil, styleExamples: [String] = [],
-    ruleID: UUID? = nil
+    context: ItemContext, template: FilenameTemplate? = nil,
+    semanticCondition: String? = nil, operations: [NamingOperation] = [],
+    styleExamples: [String] = [], ruleID: UUID? = nil
   ) {
     self.context = context
     self.template = template
+    self.semanticCondition = semanticCondition
+    self.operations = operations
     self.styleExamples = Array(styleExamples.prefix(8))
     self.ruleID = ruleID
+  }
+}
+
+public enum SemanticNamingConditionEvaluation: Codable, Hashable, Sendable {
+  case match(reason: String)
+  case noMatch(reason: String)
+  case uncertain(reason: String)
+
+  public var reason: String {
+    switch self {
+    case .match(let reason), .noMatch(let reason), .uncertain(let reason): reason
+    }
   }
 }
 
