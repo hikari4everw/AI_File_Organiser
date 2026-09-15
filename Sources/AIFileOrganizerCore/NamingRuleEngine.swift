@@ -18,14 +18,21 @@ public struct NamingRuleEngine: Sendable {
           reason: "命名规则需要本地 AI 判断")
       }
       let fields = fields(for: context)
-      let evaluated: [(rule: NamingRule, result: TemplateRenderResult, fullName: String?)] = matches.map {
-        let result = (try? FilenameTemplateEngine().render(template: $0.template, fields: fields))
-          ?? TemplateRenderResult(value: originalBaseName(context.snapshot))
-        let fullName = result.missingFields.isEmpty
-          ? try? FilenameValidator().validatedFullName(baseName: result.value, item: context.snapshot)
-          : nil
-        return ($0, result, fullName)
-      }
+      let baseName = originalBaseName(context.snapshot)
+      let evaluated: [(rule: NamingRule, result: TemplateRenderResult, fullName: String?)] = matches
+        .compactMap {
+          let result = (try? NamingOperationEngine().render(
+            operations: $0.operations,
+            baseName: baseName,
+            fields: fields))
+            ?? TemplateRenderResult(value: baseName)
+          guard !hasTransformation($0.operations) || result.value != baseName else { return nil }
+          let fullName = result.missingFields.isEmpty
+            ? try? FilenameValidator().validatedFullName(baseName: result.value, item: context.snapshot)
+            : nil
+          return ($0, result, fullName)
+        }
+      guard !evaluated.isEmpty else { return nil }
       if evaluated.count > 1 {
         let names = Set(evaluated.compactMap(\.fullName).map(normalizedKey))
         if names.count > 1 {
@@ -133,5 +140,12 @@ public struct NamingRuleEngine: Sendable {
   private func normalizedKey(_ value: String) -> String {
     value.precomposedStringWithCanonicalMapping
       .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+  }
+
+  private func hasTransformation(_ operations: [NamingOperation]) -> Bool {
+    operations.contains { operation in
+      if case .renderTemplate = operation { return false }
+      return true
+    }
   }
 }

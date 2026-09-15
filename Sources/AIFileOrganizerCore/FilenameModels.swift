@@ -39,12 +39,22 @@ public struct TemplateRenderResult: Codable, Hashable, Sendable {
   }
 }
 
+public enum NamingOperation: Codable, Hashable, Sendable {
+  case renderTemplate(FilenameTemplate)
+  case removeLiteralPrefix(String)
+  case removeLiteralSuffix(String)
+  case removeNumericPrefix(prefix: String, suffix: String)
+  case removeNumericSuffix(prefix: String, suffix: String)
+  case replaceLiteral(target: String, replacement: String)
+}
+
 public struct NamingRule: Codable, Hashable, Identifiable, Sendable {
   public var id: UUID
   public var workspaceID: UUID
   public var originalText: String
   public var condition: RuleCondition
   public var template: FilenameTemplate
+  public var operations: [NamingOperation]
   public var isEnabled: Bool
   public var isDerived: Bool
   public var createdAt: Date
@@ -59,9 +69,48 @@ public struct NamingRule: Codable, Hashable, Identifiable, Sendable {
     self.originalText = originalText
     self.condition = condition
     self.template = template
+    self.operations = [.renderTemplate(template)]
     self.isEnabled = isEnabled
     self.isDerived = isDerived
     self.createdAt = createdAt
+  }
+
+  public init(
+    id: UUID = UUID(), workspaceID: UUID, originalText: String, condition: RuleCondition,
+    operations: [NamingOperation], isEnabled: Bool = true, isDerived: Bool = false,
+    createdAt: Date = Date()
+  ) {
+    self.id = id
+    self.workspaceID = workspaceID
+    self.originalText = originalText
+    self.condition = condition
+    self.template = operations.compactMap { operation -> FilenameTemplate? in
+      guard case .renderTemplate(let template) = operation else { return nil }
+      return template
+    }.first ?? FilenameTemplate(pattern: "{原标题}")
+    self.operations = operations
+    self.isEnabled = isEnabled
+    self.isDerived = isDerived
+    self.createdAt = createdAt
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, workspaceID, originalText, condition, template, operations, isEnabled, isDerived,
+      createdAt
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decode(UUID.self, forKey: .id)
+    workspaceID = try values.decode(UUID.self, forKey: .workspaceID)
+    originalText = try values.decode(String.self, forKey: .originalText)
+    condition = try values.decode(RuleCondition.self, forKey: .condition)
+    template = try values.decode(FilenameTemplate.self, forKey: .template)
+    operations = try values.decodeIfPresent([NamingOperation].self, forKey: .operations)
+      ?? [.renderTemplate(template)]
+    isEnabled = try values.decode(Bool.self, forKey: .isEnabled)
+    isDerived = try values.decode(Bool.self, forKey: .isDerived)
+    createdAt = try values.decode(Date.self, forKey: .createdAt)
   }
 }
 
@@ -70,6 +119,7 @@ public struct NamingRuleDraft: Codable, Hashable, Identifiable, Sendable {
   public var originalText: String
   public var condition: RuleCondition
   public var template: FilenameTemplate
+  public var operations: [NamingOperation]
   public var warnings: [String]
 
   public init(
@@ -80,7 +130,38 @@ public struct NamingRuleDraft: Codable, Hashable, Identifiable, Sendable {
     self.originalText = originalText
     self.condition = condition
     self.template = template
+    self.operations = [.renderTemplate(template)]
     self.warnings = warnings
+  }
+
+  public init(
+    id: UUID = UUID(), originalText: String, condition: RuleCondition,
+    operations: [NamingOperation], warnings: [String] = []
+  ) {
+    self.id = id
+    self.originalText = originalText
+    self.condition = condition
+    self.template = operations.compactMap { operation -> FilenameTemplate? in
+      guard case .renderTemplate(let template) = operation else { return nil }
+      return template
+    }.first ?? FilenameTemplate(pattern: "{原标题}")
+    self.operations = operations
+    self.warnings = warnings
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, originalText, condition, template, operations, warnings
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decode(UUID.self, forKey: .id)
+    originalText = try values.decode(String.self, forKey: .originalText)
+    condition = try values.decode(RuleCondition.self, forKey: .condition)
+    template = try values.decode(FilenameTemplate.self, forKey: .template)
+    operations = try values.decodeIfPresent([NamingOperation].self, forKey: .operations)
+      ?? [.renderTemplate(template)]
+    warnings = try values.decode([String].self, forKey: .warnings)
   }
 }
 

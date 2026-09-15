@@ -931,11 +931,17 @@ final class AppModel: ObservableObject {
       guard draft.condition.hasDeterministicConditions
         || draft.condition.semanticDescription != nil
       else { throw OrganizerError.invalidFilename("请补全命名规则条件") }
+      let operations: [NamingOperation]
+      if draft.operations.count == 1, case .renderTemplate = draft.operations[0] {
+        operations = [.renderTemplate(draft.template)]
+      } else {
+        operations = draft.operations
+      }
       let rule = NamingRule(
         workspaceID: workspace.id,
         originalText: draft.originalText,
         condition: draft.condition,
-        template: draft.template)
+        operations: operations)
       try database?.saveNamingRule(rule)
       namingRules.append(rule)
       namingRuleDrafts.removeAll { $0.id == draft.id }
