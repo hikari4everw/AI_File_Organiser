@@ -86,7 +86,9 @@ public struct LearningService: Sendable {
       var result = destination
       result.keywords = Array(Set(result.keywords + samples.flatMap { $0.features.keywords })).sorted()
       let inferredTypes = samples.compactMap {
-        UTType(filenameExtension: $0.features.fileExtension)?.identifier
+        let fileExtension = $0.features.fileExtension.lowercased()
+        if fileExtension == "pdf" { return UTType.pdf.identifier }
+        return UTType(filenameExtension: fileExtension)?.identifier
       }
       result.sampleContentTypes = Array(Set(result.sampleContentTypes + inferredTypes)).sorted()
       return result
