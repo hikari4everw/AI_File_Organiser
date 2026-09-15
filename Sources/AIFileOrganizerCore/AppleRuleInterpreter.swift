@@ -46,26 +46,12 @@ public struct AppleRuleInterpreter: RuleInterpreter, NamingRuleInterpreting {
       .trimmingCharacters(in: .whitespacesAndNewlines)
     let template = FilenameTemplate(pattern: pattern)
     try FilenameTemplateEngine().validate(template)
-    let knownExtensions = [
-      "pdf", "jpg", "jpeg", "png", "heic", "gif", "txt", "md", "doc", "docx",
-      "xlsx", "csv", "pptx", "mp3", "flac", "wav", "mp4", "mov", "zip", "dmg", "pkg",
-    ]
-    let extensions = knownExtensions.filter {
-      cleaned.range(of: "\\b\($0)\\b", options: [.regularExpression, .caseInsensitive]) != nil
-    }
-    var kinds: Set<ItemKind> = []
-    if cleaned.contains("文件夹") || cleaned.contains("目录") { kinds.insert(.directory) }
     let conditionText = String(cleaned[..<marker.1.lowerBound])
       .trimmingCharacters(in: .whitespacesAndNewlines)
     return [
       NamingRuleDraft(
         originalText: cleaned,
-        condition: RuleCondition(
-          itemKinds: kinds,
-          fileExtensions: Set(extensions),
-          semanticDescription: extensions.isEmpty && kinds.isEmpty && !conditionText.isEmpty
-            ? conditionText : nil
-        ),
+        condition: namingCondition(in: conditionText),
         template: template
       )
     ]
@@ -75,40 +61,50 @@ public struct AppleRuleInterpreter: RuleInterpreter, NamingRuleInterpreting {
     let transformationMarkers = ["删除前缀", "删除后缀", "替换为", "替换成", "删除文件名"]
     guard transformationMarkers.contains(where: text.contains) else { return nil }
 
+    if transformationMarkers.reduce(0, { $0 + occurrenceCount(of: $1, in: text) }) > 1 {
+      let segments = transformationSegments(in: text)
+      return NamingRuleDraft(
+        originalText: text,
+        condition: namingCondition(in: segments.condition),
+        operations: [],
+        warnings: ["检测到多项命名变换，无法可靠确定执行顺序，请拆分为多条规则"])
+    }
+
     if text.contains("删除前缀"),
       text.range(of: "nhentai-[0-9]+\\s*-\\s*", options: .regularExpression) != nil
     {
+      let conditionText = text.range(of: "删除前缀").map {
+        String(text[..<$0.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+      } ?? ""
+      var condition = namingCondition(in: conditionText)
+      condition.filenameKeywords.insert(RuleCondition.normalize("nhentai-"))
       guard text.contains("同人志") else {
         return NamingRuleDraft(
           originalText: text,
-          condition: RuleCondition(filenameKeywords: ["nhentai-"]),
+          condition: condition,
           operations: [],
           warnings: ["nhentai 前缀规则需要明确限定为同人志，未生成可执行操作"])
       }
       return NamingRuleDraft(
         originalText: text,
-        condition: RuleCondition(
-          filenameKeywords: ["nhentai-"],
-          semanticDescription: "同人志"),
+        condition: condition,
         operations: [.removeNumericPrefix(prefix: "nhentai-", suffix: " - ")])
     }
 
-    let marker: String
+    let segments = transformationSegments(in: text)
+    let operationText = segments.operation
     let operation: NamingOperation?
-    if let range = text.range(of: "删除前缀") {
-      marker = "删除前缀"
-      operation = quotedOperand(in: String(text[range.upperBound...]))
+    if let range = operationText.range(of: "删除前缀") {
+      operation = quotedOperand(in: String(operationText[range.upperBound...]))
         .map(NamingOperation.removeLiteralPrefix)
-    } else if let range = text.range(of: "删除后缀") {
-      marker = "删除后缀"
-      operation = quotedOperand(in: String(text[range.upperBound...]))
+    } else if let range = operationText.range(of: "删除后缀") {
+      operation = quotedOperand(in: String(operationText[range.upperBound...]))
         .map(NamingOperation.removeLiteralSuffix)
     } else if let replacementMarker = ["替换为", "替换成"].compactMap({ value in
-      text.range(of: value).map { (value, $0) }
+      operationText.range(of: value).map { (value, $0) }
     }).min(by: { $0.1.lowerBound < $1.1.lowerBound }) {
-      marker = replacementMarker.0
-      let before = String(text[..<replacementMarker.1.lowerBound])
-      let after = String(text[replacementMarker.1.upperBound...])
+      let before = String(operationText[..<replacementMarker.1.lowerBound])
+      let after = String(operationText[replacementMarker.1.upperBound...])
       if let target = replacementOperand(in: before),
         let replacement = replacementOperand(in: after)
       {
@@ -117,18 +113,15 @@ public struct AppleRuleInterpreter: RuleInterpreter, NamingRuleInterpreting {
         operation = nil
       }
     } else {
-      marker = "删除文件名"
       operation = nil
     }
 
-    let conditionText = String(text[..<(text.range(of: marker)?.lowerBound ?? text.endIndex)])
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    var condition = namingCondition(in: conditionText)
+    var condition = namingCondition(in: segments.condition)
     if condition.semanticDescription == nil,
       !condition.hasDeterministicConditions,
-      !conditionText.isEmpty
+      !segments.condition.isEmpty
     {
-      condition.semanticDescription = conditionText
+      condition.semanticDescription = segments.condition
     }
     guard let operation else {
       return NamingRuleDraft(
@@ -143,6 +136,49 @@ public struct AppleRuleInterpreter: RuleInterpreter, NamingRuleInterpreting {
       operations: [operation])
   }
 
+  private func transformationSegments(in text: String) -> (condition: String, operation: String) {
+    let matches = ["删除前缀", "删除后缀", "替换为", "替换成", "删除文件名"].compactMap {
+      marker in text.range(of: marker).map { (marker, $0) }
+    }
+    guard let first = matches.min(by: { $0.1.lowerBound < $1.1.lowerBound }) else {
+      return ("", text)
+    }
+
+    var operationStart = first.1.lowerBound
+    if first.0 == "替换为" || first.0 == "替换成" {
+      let beforeMarker = text[..<first.1.lowerBound]
+      let introducers = ["把", "将"].compactMap {
+        beforeMarker.range(of: $0, options: .backwards)?.lowerBound
+      }
+      if let introducer = introducers.max() {
+        operationStart = introducer
+      } else if let separator = beforeMarker.lastIndex(where: { "，,；;。".contains($0) }) {
+        operationStart = text.index(after: separator)
+      } else {
+        operationStart = text.startIndex
+      }
+    }
+
+    let condition = String(text[..<operationStart])
+      .trimmingCharacters(in: .whitespacesAndNewlines.union(
+        CharacterSet(charactersIn: "，,。；;：:")))
+    let operation = String(text[operationStart...])
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return (condition, operation)
+  }
+
+  private func occurrenceCount(of marker: String, in text: String) -> Int {
+    var count = 0
+    var searchStart = text.startIndex
+    while searchStart < text.endIndex,
+      let range = text.range(of: marker, range: searchStart..<text.endIndex)
+    {
+      count += 1
+      searchStart = range.upperBound
+    }
+    return count
+  }
+
   private func namingCondition(in text: String) -> RuleCondition {
     let knownExtensions = [
       "pdf", "jpg", "jpeg", "png", "heic", "gif", "txt", "md", "doc", "docx",
@@ -151,9 +187,42 @@ public struct AppleRuleInterpreter: RuleInterpreter, NamingRuleInterpreting {
     let extensions = knownExtensions.filter {
       text.range(of: "\\b\($0)\\b", options: [.regularExpression, .caseInsensitive]) != nil
     }
+    let keywordMarkers = ["文件名包含", "名称包含", "名字包含", "文件名含有", "名称含有", "名字含有"]
+    var filenameKeywords: Set<String> = []
+    for marker in keywordMarkers {
+      guard let range = text.range(of: marker),
+        let keyword = quotedOperand(in: String(text[range.upperBound...]))
+      else { continue }
+      filenameKeywords.insert(keyword)
+    }
     var kinds: Set<ItemKind> = []
     if text.contains("文件夹") || text.contains("目录") { kinds.insert(.directory) }
-    return RuleCondition(itemKinds: kinds, fileExtensions: Set(extensions))
+    let textWithoutFilename = text.replacingOccurrences(of: "文件名", with: "")
+    if kinds.isEmpty, textWithoutFilename.contains("文件") { kinds.insert(.file) }
+
+    var remaining = text
+    for fileExtension in extensions {
+      remaining = remaining.replacingOccurrences(
+        of: "\\b\(fileExtension)\\b",
+        with: "",
+        options: [.regularExpression, .caseInsensitive])
+    }
+    for marker in keywordMarkers {
+      remaining = remaining.replacingOccurrences(
+        of: "\(marker)\\s*[「『“\\\"][^」』”\\\"]+[」』”\\\"]的?",
+        with: "",
+        options: .regularExpression)
+    }
+    for representedText in ["对于", "针对", "文件夹", "目录", "文件"] {
+      remaining = remaining.replacingOccurrences(of: representedText, with: "")
+    }
+    let semantic = remaining.trimmingCharacters(
+      in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "，,。；;：:")))
+    return RuleCondition(
+      itemKinds: kinds,
+      fileExtensions: Set(extensions),
+      filenameKeywords: filenameKeywords,
+      semanticDescription: semantic.isEmpty ? nil : semantic)
   }
 
   private func quotedOperand(in text: String) -> String? {

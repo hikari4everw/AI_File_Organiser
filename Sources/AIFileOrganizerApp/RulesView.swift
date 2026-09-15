@@ -196,7 +196,10 @@ private struct NamingRuleDraftCard: View {
         Spacer()
         Button("放弃") { model.namingRuleDrafts.removeAll { $0.id == draft.id } }
         Button("保存命名规则") {
-          model.saveNamingRuleDraft(draft, exampleEvaluation: exampleEvaluation)
+          model.saveNamingRuleDraft(
+            draft,
+            exampleOriginalName: originalExample,
+            exampleExpectedName: expectedExample)
         }
           .buttonStyle(.borderedProminent)
           .disabled(!exampleEvaluation.canSave)

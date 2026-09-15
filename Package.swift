@@ -41,7 +41,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AIFileOrganizerCoreTests",
-            dependencies: ["AIFileOrganizerCore"]
+            dependencies: ["AIFileOrganizerCore", "AIFileOrganizerApp"]
         ),
     ]
 )

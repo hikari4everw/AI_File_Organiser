@@ -933,11 +933,17 @@ final class AppModel: ObservableObject {
 
   func saveNamingRuleDraft(
     _ draft: NamingRuleDraft,
-    exampleEvaluation: NamingRuleExampleEvaluation? = nil
+    exampleOriginalName: String = "",
+    exampleExpectedName: String? = nil
   ) {
     guard let workspace else { return }
     do {
-      if let reason = exampleEvaluation?.blockingReason {
+      let exampleEvaluation = NamingRuleExampleEvaluator().evaluate(
+        operations: draft.operations,
+        condition: draft.condition,
+        originalName: exampleOriginalName,
+        expectedName: exampleExpectedName)
+      if let reason = exampleEvaluation.blockingReason {
         throw OrganizerError.invalidFilename(reason)
       }
       let operations = draft.operations

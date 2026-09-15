@@ -209,6 +209,30 @@ import Testing
     #expect(draft.warnings.isEmpty)
   }
 
+  @Test func combinedSemanticAndExtensionConditionArePreserved() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于同人志 PDF 文件，删除前缀「draft_」").first)
+
+    #expect(draft.condition.fileExtensions == ["pdf"])
+    #expect(draft.condition.semanticDescription == "同人志")
+    #expect(draft.operations == [.removeLiteralPrefix("draft_")])
+  }
+
+  @Test func nhentaiSpecialCaseAddsConstraintWithoutDiscardingExplicitConditions() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于名称包含「月光」的同人志 PDF 文件，删除前缀无意义编码，例如 nhentai-651786 - ..."
+      ).first)
+
+    #expect(draft.condition.itemKinds == [.file])
+    #expect(draft.condition.fileExtensions == ["pdf"])
+    #expect(draft.condition.filenameKeywords == ["月光", "nhentai-"])
+    #expect(draft.condition.semanticDescription == "同人志")
+    #expect(
+      draft.operations == [.removeNumericPrefix(prefix: "nhentai-", suffix: " - ")])
+  }
+
   @Test func nhentaiExampleWithoutDoujinshiMeaningIsNotExecutable() async throws {
     let draft = try #require(
       try await AppleRuleInterpreter().interpretNaming(
@@ -231,6 +255,141 @@ import Testing
     #expect(suffix.operations == [.removeLiteralSuffix(" - 副本")])
     #expect(replacement.condition.fileExtensions == ["txt"])
     #expect(replacement.operations == [.replaceLiteral(target: "_", replacement: "-")])
+  }
+
+  @Test func replacementOperandsAreReadOnlyFromOperationFragment() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于名称包含「draft」的 PDF 文件，把「_」替换为「-」").first)
+
+    #expect(draft.condition.itemKinds == [.file])
+    #expect(draft.condition.fileExtensions == ["pdf"])
+    #expect(draft.condition.filenameKeywords == ["draft"])
+    #expect(draft.condition.semanticDescription == nil)
+    #expect(draft.operations == [.replaceLiteral(target: "_", replacement: "-")])
+  }
+
+  @Test func multipleTransformationsAreRejectedWhenOrderCannotBeParsedReliably() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于 PDF 文件，删除前缀「draft_」，再把「_」替换为「-」").first)
+
+    #expect(draft.condition.fileExtensions == ["pdf"])
+    #expect(draft.operations.isEmpty)
+    #expect(draft.warnings.contains(where: { $0.contains("多项") && $0.contains("顺序") }))
+  }
+
+  @Test func naturalLanguageCombinedSemanticAndDeterministicConditionsReachExecution() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于同人志 PDF 文件，删除前缀「draft_」").first)
+    let rule = NamingRule(
+      workspaceID: UUID(),
+      originalText: draft.originalText,
+      condition: draft.condition,
+      operations: draft.operations)
+    let sessionID = UUID()
+    let pdf = ItemSnapshot(
+      sessionID: sessionID,
+      path: "/tmp/draft_chapter.pdf",
+      name: "draft_chapter.pdf",
+      kind: .file,
+      fileExtension: "pdf")
+    let text = ItemSnapshot(
+      sessionID: sessionID,
+      path: "/tmp/draft_chapter.txt",
+      name: "draft_chapter.txt",
+      kind: .file,
+      fileExtension: "txt")
+
+    let proposals = NamingRuleEngine().proposals(
+      sessionID: sessionID,
+      contexts: [
+        ItemContext(snapshot: pdf, normalizedKeywords: []),
+        ItemContext(snapshot: text, normalizedKeywords: []),
+      ],
+      rules: [rule],
+      semanticEvaluationsByItem: [
+        pdf.id: [rule.id: .match(reason: "是同人志")],
+        text.id: [rule.id: .match(reason: "是同人志")],
+      ])
+
+    #expect(proposals.map(\.itemID) == [pdf.id])
+    #expect(proposals.first?.suggestedBaseName == "chapter")
+  }
+
+  @Test func naturalLanguageNhentaiRuleKeepsFileTypeConstraintDuringExecution() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于同人志 PDF 文件，删除前缀无意义编码，例如 nhentai-651786 - ...").first)
+    let rule = NamingRule(
+      workspaceID: UUID(),
+      originalText: draft.originalText,
+      condition: draft.condition,
+      operations: draft.operations)
+    let sessionID = UUID()
+    let pdf = ItemSnapshot(
+      sessionID: sessionID,
+      path: "/tmp/nhentai-651786 - 月光.pdf",
+      name: "nhentai-651786 - 月光.pdf",
+      kind: .file,
+      fileExtension: "pdf")
+    let image = ItemSnapshot(
+      sessionID: sessionID,
+      path: "/tmp/nhentai-651786 - 月光.jpg",
+      name: "nhentai-651786 - 月光.jpg",
+      kind: .file,
+      fileExtension: "jpg")
+
+    let proposals = NamingRuleEngine().proposals(
+      sessionID: sessionID,
+      contexts: [
+        ItemContext(snapshot: pdf, normalizedKeywords: []),
+        ItemContext(snapshot: image, normalizedKeywords: []),
+      ],
+      rules: [rule],
+      semanticEvaluationsByItem: [
+        pdf.id: [rule.id: .match(reason: "是同人志")],
+        image.id: [rule.id: .match(reason: "是同人志")],
+      ])
+
+    #expect(proposals.map(\.itemID) == [pdf.id])
+    #expect(proposals.first?.suggestedBaseName == "月光")
+  }
+
+  @Test func naturalLanguageQuotedConditionAndReplacementReachExecution() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于名称包含「draft」的 PDF 文件，把「_」替换为「-」").first)
+    let rule = NamingRule(
+      workspaceID: UUID(),
+      originalText: draft.originalText,
+      condition: draft.condition,
+      operations: draft.operations)
+    let sessionID = UUID()
+    let matching = ItemSnapshot(
+      sessionID: sessionID,
+      path: "/tmp/draft_report.pdf",
+      name: "draft_report.pdf",
+      kind: .file,
+      fileExtension: "pdf")
+    let other = ItemSnapshot(
+      sessionID: sessionID,
+      path: "/tmp/final_report.pdf",
+      name: "final_report.pdf",
+      kind: .file,
+      fileExtension: "pdf")
+
+    let proposals = NamingRuleEngine().proposals(
+      sessionID: sessionID,
+      contexts: [
+        ItemContext(snapshot: matching, normalizedKeywords: []),
+        ItemContext(snapshot: other, normalizedKeywords: []),
+      ],
+      rules: [rule])
+
+    #expect(proposals.map(\.itemID) == [matching.id])
+    #expect(proposals.first?.suggestedBaseName == "draft-report")
   }
 
   @Test func ambiguousTransformationReturnsWarningWithoutExecutableOperation() async throws {

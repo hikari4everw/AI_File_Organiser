@@ -211,6 +211,16 @@ private enum FilenameSemanticTestError: Error {
     #expect(draft.template.pattern == "{作者} - {标题}")
   }
 
+  @Test func templateNamingPreservesCombinedSemanticAndExtensionConditions() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于同人志 PDF 文件，命名为 {原标题}").first)
+
+    #expect(draft.condition.itemKinds == [.file])
+    #expect(draft.condition.fileExtensions == ["pdf"])
+    #expect(draft.condition.semanticDescription == "同人志")
+  }
+
   @Test(arguments: [
     "550e8400-e29b-41d4-a716-446655440000.pdf",
     "8f14e45fceea167a5a36dedd4bea2543.pdf",
