@@ -252,3 +252,87 @@ dist/AI File Organizer.app
 1. 无过滤 Swift Testing runner 在当前环境仍会并发挂起；逐 suite 已覆盖全部 127 项并给出唯一失败。
 2. `LearningTests` 的 PDF UTI 断言仍受当前 macOS/SDK 环境影响，属于既有问题，本次未越界修复。
 3. 自然语言解析仍只结构化已知扩展名、明确文件/目录词和带引号的名称包含条件；其他未表示条件会进入 `semanticDescription`，需要既有语义判断流程确认。
+
+## Fix Round 2：nhentai 后置“同人志”语义门槛
+
+### 问题与最小修复
+
+复审发现 nhentai 特例只解析 `删除前缀` 之前的条件，却用整句 `contains("同人志")` 决定是否生成可执行 operation。因此“同人志”仅出现在操作/示例片段时，旧实现会生成可执行操作，但 `semanticDescription` 为 nil，规则可绕过语义判断直接执行。
+
+修复限定在 nhentai 特例：整句通过“同人志”门槛后，若已解析语义不含“同人志”则追加；若没有已解析语义则设为 `同人志`。确定性的 item kind、扩展名和 filename keywords 保持不变。
+
+### TDD：RED
+
+新增测试：`nhentaiMeaningAfterOperationMarkerStillRequiresSemanticDecision`
+
+命令：
+
+```sh
+env CLANG_MODULE_CACHE_PATH=/tmp/codex-rule-enhancement-clang-cache \
+  SWIFTPM_MODULECACHE_OVERRIDE=/tmp/codex-rule-enhancement-swiftpm-cache \
+  swift test --disable-sandbox \
+  --filter nhentaiMeaningAfterOperationMarkerStillRequiresSemanticDecision
+```
+
+实际 RED：
+
+```text
+Expectation failed: (draft.condition.semanticDescription → nil) == "同人志"
+Expectation failed: (proposal.disposition → .selectedByRule) == .blocked
+Expectation failed: (proposal.reason → "匹配用户命名规则").contains("需要本地 AI 判断")
+Test run with 1 test in 1 suite failed ... with 3 issues.
+EXIT_CODE=1
+```
+
+失败直接证明旧草稿缺少语义条件，真实 `NamingRuleEngine` 在没有语义 evaluation 时仍选择执行规则。
+
+### TDD：GREEN
+
+同一命令在最小生产改动后：
+
+```text
+Test nhentaiMeaningAfterOperationMarkerStillRequiresSemanticDecision() passed
+Suite NamingOperationTests passed
+Test run with 1 test in 1 suite passed
+EXIT_CODE=0
+```
+
+测试同时确认 PDF 与 `nhentai-` 确定性条件仍保留，并通过真实规则执行验证：未提供 semantic match 时 proposal 为 `.blocked`，原因包含“需要本地 AI 判断”。
+
+### 最终验证
+
+逐一运行全部 14 个 suite（`--skip-build --filter <Suite>`）：
+
+```text
+共 128 项：127 项通过，1 项失败
+NamingOperationTests：26/26 通过
+FilenameTests：28/28 通过
+RuleCreationTests：9/9 通过
+RuleTests：13/13 通过
+AppModelTests：1/1 通过
+```
+
+唯一失败仍为既有环境断言：
+
+```text
+LearningTests.existingLibraryFilesRefreshWithoutDuplicatesAndEnrichDestination
+Expectation failed: enriched.first?.sampleContentTypes.contains("com.adobe.pdf") == true
+```
+
+最终 Release 构建：
+
+```text
+./scripts/build-app.sh
+** BUILD SUCCEEDED **
+dist/AI File Organizer.app
+```
+
+`codesign --verify --deep --strict` 与 `git diff --check` 均以退出码 0 完成。
+
+### Fix Round 2 修改文件与自审
+
+- `Sources/AIFileOrganizerCore/AppleRuleInterpreter.swift`
+- `Tests/AIFileOrganizerCoreTests/NamingOperationTests.swift`
+- `.superpowers/sdd/rule-enhancement/final-fix-report.md`
+
+自审：改动只补齐已被整句门槛要求的 `同人志` 语义，不改变 nhentai 数字前缀操作、确定性条件解析或非 nhentai 路径；已有语义约束不会被覆盖。疑虑仍只有既有 Swift Testing 并发挂起与 Learning PDF UTI 环境失败。

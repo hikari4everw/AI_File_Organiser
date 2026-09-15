@@ -85,6 +85,13 @@ public struct AppleRuleInterpreter: RuleInterpreter, NamingRuleInterpreting {
           operations: [],
           warnings: ["nhentai 前缀规则需要明确限定为同人志，未生成可执行操作"])
       }
+      if let semantic = condition.semanticDescription {
+        if !semantic.contains("同人志") {
+          condition.semanticDescription = "\(semantic)；同人志"
+        }
+      } else {
+        condition.semanticDescription = "同人志"
+      }
       return NamingRuleDraft(
         originalText: text,
         condition: condition,

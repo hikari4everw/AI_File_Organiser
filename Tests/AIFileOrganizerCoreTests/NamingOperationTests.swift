@@ -233,6 +233,37 @@ import Testing
       draft.operations == [.removeNumericPrefix(prefix: "nhentai-", suffix: " - ")])
   }
 
+  @Test func nhentaiMeaningAfterOperationMarkerStillRequiresSemanticDecision() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于 PDF 文件，删除前缀无意义编码，例如 nhentai-651786 - 同人志").first)
+    #expect(draft.condition.fileExtensions == ["pdf"])
+    #expect(draft.condition.filenameKeywords == ["nhentai-"])
+    #expect(draft.condition.semanticDescription == "同人志")
+
+    let rule = NamingRule(
+      workspaceID: UUID(),
+      originalText: draft.originalText,
+      condition: draft.condition,
+      operations: draft.operations)
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID,
+      path: "/tmp/nhentai-42 - Example.pdf",
+      name: "nhentai-42 - Example.pdf",
+      kind: .file,
+      fileExtension: "pdf")
+
+    let proposal = try #require(NamingRuleEngine().proposals(
+      sessionID: sessionID,
+      contexts: [ItemContext(snapshot: item, normalizedKeywords: [])],
+      rules: [rule]
+    ).first)
+
+    #expect(proposal.disposition == .blocked)
+    #expect(proposal.reason.contains("需要本地 AI 判断"))
+  }
+
   @Test func nhentaiExampleWithoutDoujinshiMeaningIsNotExecutable() async throws {
     let draft = try #require(
       try await AppleRuleInterpreter().interpretNaming(
