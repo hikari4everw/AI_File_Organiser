@@ -22,7 +22,7 @@ import Foundation
   }
 #endif
 
-public struct AppleRuleInterpreter: RuleInterpreter {
+public struct AppleRuleInterpreter: RuleInterpreter, NamingRuleInterpreting {
   public init() {}
 
   public func interpretNaming(text: String) async throws -> [NamingRuleDraft] {

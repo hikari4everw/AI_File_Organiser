@@ -24,6 +24,10 @@ struct RulesView: View {
           }
         }
 
+        ForEach(model.ruleInterpretationWarnings, id: \.self) { warning in
+          Label(warning, systemImage: "exclamationmark.triangle")
+            .font(.caption).foregroundStyle(.orange)
+        }
         ForEach($model.ruleDrafts) { $draft in
           RuleDraftCard(model: model, draft: $draft)
         }
@@ -123,17 +127,27 @@ struct RulesView: View {
 private struct NamingRuleDraftCard: View {
   @ObservedObject var model: AppModel
   @Binding var draft: NamingRuleDraft
+  @State private var originalExample = ""
+  @State private var expectedExample = ""
+
+  private var exampleEvaluation: NamingRuleExampleEvaluation {
+    NamingRuleExampleEvaluator().evaluate(
+      operations: draft.operations,
+      condition: draft.condition,
+      originalName: originalExample,
+      expectedName: expectedExample)
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
       Label("请确认命名规则草稿", systemImage: "character.cursor.ibeam").font(.headline)
       TextField("原始描述", text: $draft.originalText).textFieldStyle(.roundedBorder)
-      TextField("命名模板", text: Binding(
-        get: { draft.template.pattern },
-        set: { draft.template.pattern = $0 }))
-        .textFieldStyle(.roundedBorder)
-      Text("支持 {原标题}、{标题}、{作者}、{日期}。缺失字段时不会改名。")
-        .font(.caption).foregroundStyle(.secondary)
+      VStack(alignment: .leading, spacing: 7) {
+        Text("操作（按顺序执行）").font(.subheadline.weight(.medium))
+        ForEach(Array(draft.operations.indices), id: \.self) { index in
+          operationEditor(at: index)
+        }
+      }
       TextField("扩展名（逗号分隔）", text: Binding(
         get: { draft.condition.fileExtensions.sorted().joined(separator: ", ") },
         set: { draft.condition.fileExtensions = commaSet($0) }))
@@ -154,11 +168,38 @@ private struct NamingRuleDraftCard: View {
         Label(warning, systemImage: "exclamationmark.triangle")
           .font(.caption).foregroundStyle(.orange)
       }
+      VStack(alignment: .leading, spacing: 7) {
+        Text("示例预览（可选）").font(.subheadline.weight(.medium))
+        HStack {
+          TextField("原名称，如 draft_report.pdf", text: $originalExample)
+          TextField("预期名称（可选）", text: $expectedExample)
+        }
+        .textFieldStyle(.roundedBorder)
+        if let preview = exampleEvaluation.preview {
+          HStack(spacing: 7) {
+            Text(preview.originalName).lineLimit(1)
+            Image(systemName: "arrow.right").foregroundStyle(.secondary)
+            Text(preview.suggestedName).lineLimit(1).fontWeight(.medium)
+          }
+          .font(.caption)
+          if preview.isSemanticConditionUnverified {
+            Label("此预览只执行文字操作，尚未验证语义条件", systemImage: "brain")
+              .font(.caption).foregroundStyle(.orange)
+          }
+        }
+        if let reason = exampleEvaluation.blockingReason {
+          Label(reason, systemImage: "xmark.circle")
+            .font(.caption).foregroundStyle(.red)
+        }
+      }
       HStack {
         Spacer()
         Button("放弃") { model.namingRuleDrafts.removeAll { $0.id == draft.id } }
-        Button("保存命名规则") { model.saveNamingRuleDraft(draft) }
+        Button("保存命名规则") {
+          model.saveNamingRuleDraft(draft, exampleEvaluation: exampleEvaluation)
+        }
           .buttonStyle(.borderedProminent)
+          .disabled(!exampleEvaluation.canSave)
       }
     }
     .padding(16).background(.purple.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
@@ -167,6 +208,129 @@ private struct NamingRuleDraftCard: View {
   private func commaSet(_ text: String) -> Set<String> {
     Set(text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
       .filter { !$0.isEmpty })
+  }
+
+  @ViewBuilder private func operationEditor(at index: Int) -> some View {
+    if draft.operations.indices.contains(index) {
+      HStack(spacing: 8) {
+        Text("\(index + 1)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+          .frame(width: 16, alignment: .trailing)
+        operationFields(at: index)
+        Button {
+          draft.operations.swapAt(index, index - 1)
+        } label: {
+          Image(systemName: "arrow.up")
+        }
+        .buttonStyle(.borderless).disabled(index == 0)
+        .help("上移")
+        Button {
+          draft.operations.swapAt(index, index + 1)
+        } label: {
+          Image(systemName: "arrow.down")
+        }
+        .buttonStyle(.borderless).disabled(index == draft.operations.count - 1)
+        .help("下移")
+        Button(role: .destructive) {
+          draft.operations.remove(at: index)
+        } label: {
+          Image(systemName: "trash")
+        }
+        .buttonStyle(.borderless).help("删除操作")
+      }
+    }
+  }
+
+  @ViewBuilder private func operationFields(at index: Int) -> some View {
+    switch draft.operations[index] {
+    case .renderTemplate:
+      operationLabel("模板")
+      TextField("{作者} - {标题}", text: operationTextBinding(at: index, part: 0))
+        .textFieldStyle(.roundedBorder)
+    case .removeLiteralPrefix:
+      operationLabel("删除前缀")
+      TextField("字面前缀", text: operationTextBinding(at: index, part: 0))
+        .textFieldStyle(.roundedBorder)
+    case .removeLiteralSuffix:
+      operationLabel("删除后缀")
+      TextField("字面后缀", text: operationTextBinding(at: index, part: 0))
+        .textFieldStyle(.roundedBorder)
+    case .removeNumericPrefix:
+      operationLabel("数字前缀")
+      TextField("数字前文字", text: operationTextBinding(at: index, part: 0))
+        .textFieldStyle(.roundedBorder)
+      TextField("数字后文字", text: operationTextBinding(at: index, part: 1))
+        .textFieldStyle(.roundedBorder)
+    case .removeNumericSuffix:
+      operationLabel("数字后缀")
+      TextField("数字前文字", text: operationTextBinding(at: index, part: 0))
+        .textFieldStyle(.roundedBorder)
+      TextField("数字后文字", text: operationTextBinding(at: index, part: 1))
+        .textFieldStyle(.roundedBorder)
+    case .replaceLiteral:
+      operationLabel("字面替换")
+      TextField("查找", text: operationTextBinding(at: index, part: 0))
+        .textFieldStyle(.roundedBorder)
+      TextField("替换为", text: operationTextBinding(at: index, part: 1))
+        .textFieldStyle(.roundedBorder)
+    }
+  }
+
+  private func operationLabel(_ text: String) -> some View {
+    Text(text).font(.caption).foregroundStyle(.secondary)
+      .frame(width: 70, alignment: .leading)
+  }
+
+  private func operationTextBinding(at index: Int, part: Int) -> Binding<String> {
+    Binding(
+      get: {
+        guard draft.operations.indices.contains(index) else { return "" }
+        return operationText(draft.operations[index], part: part)
+      },
+      set: { value in
+        guard draft.operations.indices.contains(index) else { return }
+        draft.operations[index] = replacingOperationText(
+          draft.operations[index], part: part, value: value)
+        if draft.operations.count == 1,
+          case .renderTemplate(let template) = draft.operations[index]
+        {
+          draft.template = template
+        }
+      })
+  }
+
+  private func operationText(_ operation: NamingOperation, part: Int) -> String {
+    switch operation {
+    case .renderTemplate(let template): template.pattern
+    case .removeLiteralPrefix(let value), .removeLiteralSuffix(let value): value
+    case .removeNumericPrefix(let prefix, let suffix),
+      .removeNumericSuffix(let prefix, let suffix): part == 0 ? prefix : suffix
+    case .replaceLiteral(let target, let replacement): part == 0 ? target : replacement
+    }
+  }
+
+  private func replacingOperationText(
+    _ operation: NamingOperation, part: Int, value: String
+  ) -> NamingOperation {
+    switch operation {
+    case .renderTemplate:
+      .renderTemplate(FilenameTemplate(pattern: value))
+    case .removeLiteralPrefix:
+      .removeLiteralPrefix(value)
+    case .removeLiteralSuffix:
+      .removeLiteralSuffix(value)
+    case .removeNumericPrefix(let prefix, let suffix):
+      .removeNumericPrefix(
+        prefix: part == 0 ? value : prefix,
+        suffix: part == 1 ? value : suffix)
+    case .removeNumericSuffix(let prefix, let suffix):
+      .removeNumericSuffix(
+        prefix: part == 0 ? value : prefix,
+        suffix: part == 1 ? value : suffix)
+    case .replaceLiteral(let target, let replacement):
+      .replaceLiteral(
+        target: part == 0 ? value : target,
+        replacement: part == 1 ? value : replacement)
+    }
   }
 }
 

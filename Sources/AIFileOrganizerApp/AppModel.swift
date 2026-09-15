@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
   @Published var ruleDrafts: [RuleDraft] = []
   @Published var namingRules: [NamingRule] = []
   @Published var namingRuleDrafts: [NamingRuleDraft] = []
+  @Published var ruleInterpretationWarnings: [String] = []
   @Published var namingRuleSuggestions: [NamingRuleSuggestion] = []
   @Published var historyEntries: [HistoryEntry] = []
   @Published var learningSampleCount = 0
@@ -860,16 +861,22 @@ final class AppModel: ObservableObject {
       !isInterpretingRule
     else { return }
     isInterpretingRule = true
+    ruleDrafts = []
+    namingRuleDrafts = []
+    ruleInterpretationWarnings = []
+    lastError = nil
     Task { [weak self] in
       guard let self else { return }
       defer { self.isInterpretingRule = false }
       do {
         let interpreter = AppleRuleInterpreter()
-        async let organizationDrafts = interpreter.interpret(
-          text: text, destinations: self.destinations)
-        async let namingDrafts = interpreter.interpretNaming(text: text)
-        self.ruleDrafts = try await organizationDrafts
-        self.namingRuleDrafts = try await namingDrafts
+        let result = try await RuleInterpretationEngine().interpret(
+          text: text,
+          destinations: self.destinations,
+          interpreter: interpreter)
+        self.ruleDrafts = result.organizationDrafts
+        self.namingRuleDrafts = result.namingDrafts
+        self.ruleInterpretationWarnings = result.warnings
       } catch {
         self.lastError = error.localizedDescription
       }
@@ -924,15 +931,16 @@ final class AppModel: ObservableObject {
     } catch { lastError = error.localizedDescription }
   }
 
-  func saveNamingRuleDraft(_ draft: NamingRuleDraft) {
+  func saveNamingRuleDraft(
+    _ draft: NamingRuleDraft,
+    exampleEvaluation: NamingRuleExampleEvaluation? = nil
+  ) {
     guard let workspace else { return }
     do {
-      let operations: [NamingOperation]
-      if draft.operations.count == 1, case .renderTemplate = draft.operations[0] {
-        operations = [.renderTemplate(draft.template)]
-      } else {
-        operations = draft.operations
+      if let reason = exampleEvaluation?.blockingReason {
+        throw OrganizerError.invalidFilename(reason)
       }
+      let operations = draft.operations
       try NamingOperationEngine().validate(operations: operations)
       guard draft.condition.hasDeterministicConditions
         || draft.condition.semanticDescription != nil
