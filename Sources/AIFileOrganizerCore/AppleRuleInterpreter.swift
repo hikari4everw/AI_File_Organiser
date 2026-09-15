@@ -78,11 +78,18 @@ public struct AppleRuleInterpreter: RuleInterpreter {
     if text.contains("删除前缀"),
       text.range(of: "nhentai-[0-9]+\\s*-\\s*", options: .regularExpression) != nil
     {
+      guard text.contains("同人志") else {
+        return NamingRuleDraft(
+          originalText: text,
+          condition: RuleCondition(filenameKeywords: ["nhentai-"]),
+          operations: [],
+          warnings: ["nhentai 前缀规则需要明确限定为同人志，未生成可执行操作"])
+      }
       return NamingRuleDraft(
         originalText: text,
         condition: RuleCondition(
           filenameKeywords: ["nhentai-"],
-          semanticDescription: text.contains("同人志") ? "同人志" : nil),
+          semanticDescription: "同人志"),
         operations: [.removeNumericPrefix(prefix: "nhentai-", suffix: " - ")])
     }
 
@@ -165,7 +172,11 @@ public struct AppleRuleInterpreter: RuleInterpreter {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let token = trimmed.split(whereSeparator: \.isWhitespace).last else { return nil }
     let value = String(token).trimmingCharacters(in: CharacterSet(charactersIn: "，,。；;"))
-    return value.isEmpty ? nil : value
+    guard value.unicodeScalars.count == 1,
+      let scalar = value.unicodeScalars.first,
+      !CharacterSet.alphanumerics.contains(scalar)
+    else { return nil }
+    return value
   }
 
   public func interpret(text: String, destinations: [DestinationProfile]) async throws

@@ -927,16 +927,16 @@ final class AppModel: ObservableObject {
   func saveNamingRuleDraft(_ draft: NamingRuleDraft) {
     guard let workspace else { return }
     do {
-      try FilenameTemplateEngine().validate(draft.template)
-      guard draft.condition.hasDeterministicConditions
-        || draft.condition.semanticDescription != nil
-      else { throw OrganizerError.invalidFilename("请补全命名规则条件") }
       let operations: [NamingOperation]
       if draft.operations.count == 1, case .renderTemplate = draft.operations[0] {
         operations = [.renderTemplate(draft.template)]
       } else {
         operations = draft.operations
       }
+      try NamingOperationEngine().validate(operations: operations)
+      guard draft.condition.hasDeterministicConditions
+        || draft.condition.semanticDescription != nil
+      else { throw OrganizerError.invalidFilename("请补全命名规则条件") }
       let rule = NamingRule(
         workspaceID: workspace.id,
         originalText: draft.originalText,

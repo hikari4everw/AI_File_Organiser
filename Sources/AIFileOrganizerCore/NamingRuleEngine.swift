@@ -10,7 +10,9 @@ public struct NamingRuleEngine: Sendable {
   ) -> [RenameProposal] {
     contexts.compactMap { context -> RenameProposal? in
       guard context.snapshot.kind != .applicationBundle else { return nil }
-      let matches = rules.filter { $0.isEnabled && conditionMatches($0.condition, context: context) }
+      let matches = rules.filter {
+        $0.isEnabled && !$0.operations.isEmpty && conditionMatches($0.condition, context: context)
+      }
       guard !matches.isEmpty else { return nil }
       if matches.contains(where: { $0.condition.semanticDescription != nil }) {
         return blockedProposal(

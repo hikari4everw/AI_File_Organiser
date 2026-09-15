@@ -209,6 +209,16 @@ import Testing
     #expect(draft.warnings.isEmpty)
   }
 
+  @Test func nhentaiExampleWithoutDoujinshiMeaningIsNotExecutable() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "删除前缀无意义编码，例如 nhentai-651786 - ...").first)
+
+    #expect(draft.condition.semanticDescription == nil)
+    #expect(draft.operations.isEmpty)
+    #expect(draft.warnings.contains(where: { $0.contains("同人志") }))
+  }
+
   @Test func interpreterParsesLiteralSuffixAndReplacementExpressions() async throws {
     let suffix = try #require(
       try await AppleRuleInterpreter().interpretNaming(
@@ -230,6 +240,43 @@ import Testing
 
     #expect(draft.operations.isEmpty)
     #expect(draft.warnings.contains(where: { $0.contains("无法安全解析") }))
+  }
+
+  @Test func unquotedDescriptiveReplacementIsNotTreatedAsLiteralText() async throws {
+    let draft = try #require(
+      try await AppleRuleInterpreter().interpretNaming(
+        text: "对于 TXT 文件，把空格替换为下划线").first)
+
+    #expect(draft.operations.isEmpty)
+    #expect(draft.warnings.contains(where: { $0.contains("无法安全解析") }))
+  }
+
+  @Test func emptyOperationsFailSaveValidation() {
+    #expect(throws: OrganizerError.self) {
+      try NamingOperationEngine().validate(operations: [])
+    }
+  }
+
+  @Test func namingRuleEngineIgnoresUnexpectedEmptyOperationRule() {
+    let sessionID = UUID()
+    let item = ItemSnapshot(
+      sessionID: sessionID,
+      path: "/tmp/report.pdf",
+      name: "report.pdf",
+      kind: .file,
+      fileExtension: "pdf")
+    let rule = NamingRule(
+      workspaceID: UUID(),
+      originalText: "ambiguous",
+      condition: RuleCondition(fileExtensions: ["pdf"]),
+      operations: [])
+
+    let proposals = NamingRuleEngine().proposals(
+      sessionID: sessionID,
+      contexts: [ItemContext(snapshot: item, normalizedKeywords: [])],
+      rules: [rule])
+
+    #expect(proposals.isEmpty)
   }
 
   private func removingOperations(from data: Data) throws -> Data {

@@ -73,3 +73,71 @@ env CLANG_MODULE_CACHE_PATH=/tmp/ai-file-organizer-clang-cache SWIFTPM_MODULECAC
 
 - 含 `同人志` 语义条件的 nhentai 草稿在当前规则引擎中仍按既有策略阻塞为“需要本地 AI 判断”；这是 Task 2 的预期接续点。
 - 通用删除前缀/后缀只接受引号明确包围的字面量；未明确边界的自然语言会得到警告而不是被猜测执行，以避免误删。操作编辑和预览属于 Task 3。
+
+## Fix Round 1
+
+### 修复内容与覆盖测试
+
+- 将 nhentai 特例限定为明确含“同人志”的语义规则；只给 nhentai 示例而没有该语义时，保留粗粒度关键词但返回空操作和警告。测试：`nhentaiExampleWithoutDoujinshiMeaningIsNotExecutable`。
+- 未加引号的替换操作只接受单个明确的非字母数字字符；“把空格替换为下划线”不会把描述词误当字面值。测试：`unquotedDescriptiveReplacementIsNotTreatedAsLiteralText`，并保留 `_` → `-` 的正向测试。
+- `NamingOperationEngine.validate` 拒绝空操作并校验序列内模板；`AppModel.saveNamingRuleDraft` 在保存入口调用该校验。测试：`emptyOperationsFailSaveValidation`。
+- `NamingRuleEngine` 在规则筛选入口忽略意外持久化或手工构造的空操作规则。测试：`namingRuleEngineIgnoresUnexpectedEmptyOperationRule`。
+
+### RED 实际关键输出
+
+第一次运行聚焦测试，空操作保存校验尚不存在：
+
+```text
+error: value of type 'NamingOperationEngine' has no member 'validate'
+try NamingOperationEngine().validate(operations: [])
+error: fatalError
+```
+
+补入最小校验并接入保存入口后再次运行，剩余三个行为测试按预期失败：
+
+```text
+Expectation failed: (draft.operations → [replaceLiteral(target: "文件，把空格", replacement: "下划线")]).isEmpty → false
+Expectation failed: (draft.operations → [removeNumericPrefix(prefix: "nhentai-", suffix: " - ")]).isEmpty → false
+Expectation failed: (proposals → [RenameProposal(... disposition: selectedByRule ...)]).isEmpty → false
+Test run with 18 tests in 1 suite failed ... with 5 issues.
+```
+
+命令：
+
+```sh
+env CLANG_MODULE_CACHE_PATH=/tmp/ai-file-organizer-clang-cache SWIFTPM_MODULECACHE_OVERRIDE=/tmp/ai-file-organizer-swiftpm-cache swift test --filter NamingOperationTests
+```
+
+### GREEN 实际关键输出
+
+聚焦测试：
+
+```text
+Test nhentaiExampleWithoutDoujinshiMeaningIsNotExecutable() passed
+Test unquotedDescriptiveReplacementIsNotTreatedAsLiteralText() passed
+Test emptyOperationsFailSaveValidation() passed
+Test namingRuleEngineIgnoresUnexpectedEmptyOperationRule() passed
+Suite NamingOperationTests passed
+Test run with 18 tests in 1 suite passed
+```
+
+完整测试命令：
+
+```sh
+env CLANG_MODULE_CACHE_PATH=/tmp/ai-file-organizer-clang-cache SWIFTPM_MODULECACHE_OVERRIDE=/tmp/ai-file-organizer-swiftpm-cache swift test
+```
+
+完整测试关键输出：
+
+```text
+Test Suite 'All tests' passed
+Suite NamingOperationTests passed
+Test run with 103 tests in 12 suites passed
+```
+
+### Fix Round 1 自审
+
+- 三项 Important finding 都有先失败、后通过的独立回归行为测试。
+- 保存层拒绝空操作，引擎层再次过滤空操作，避免同名建议进入后续流程。
+- 替换解析仍支持引号中的多字符字面量及未加引号的 `_`、`-` 等明确单字符符号；中文描述词不会执行。
+- `git diff --check` 无空白错误；未扩大到 Task 2/3。

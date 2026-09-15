@@ -3,6 +3,17 @@ import Foundation
 public struct NamingOperationEngine: Sendable {
   public init() {}
 
+  public func validate(operations: [NamingOperation]) throws {
+    guard !operations.isEmpty else {
+      throw OrganizerError.invalidFilename("命名规则至少需要一个操作")
+    }
+    for operation in operations {
+      if case .renderTemplate(let template) = operation {
+        try FilenameTemplateEngine().validate(template)
+      }
+    }
+  }
+
   public func render(
     operations: [NamingOperation],
     baseName: String,
