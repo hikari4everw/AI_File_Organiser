@@ -270,6 +270,26 @@ public final class AppDatabase: @unchecked Sendable {
         table.column("payload_json", .blob).notNull()
       }
     }
+    migrator.registerMigration("v2.3-file-concepts") { db in
+      try db.create(table: "file_concepts") { table in
+        table.column("id", .text).primaryKey()
+        table.column("parent_id", .text).indexed()
+        table.column("name_key", .text).notNull().unique()
+        table.column("payload_json", .blob).notNull()
+        table.column("created_at", .datetime).notNull()
+      }
+      try db.create(table: "concept_examples") { table in
+        table.column("id", .text).primaryKey()
+        table.column("concept_id", .text).notNull().indexed()
+          .references("file_concepts", onDelete: .cascade)
+        table.column("item_identity", .text).notNull()
+        table.column("is_positive", .boolean).notNull()
+        table.column("model_version", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.column("created_at", .datetime).notNull()
+        table.uniqueKey(["concept_id", "item_identity"])
+      }
+    }
     try migrator.migrate(queue)
   }
 
@@ -645,6 +665,79 @@ public final class AppDatabase: @unchecked Sendable {
     }
   }
 
+  public func concepts() throws -> [FileConcept] {
+    try queue.read { db in
+      try Data.fetchAll(db, sql: "SELECT payload_json FROM file_concepts ORDER BY created_at, id")
+        .map { try decode(FileConcept.self, from: $0) }
+    }
+  }
+
+  public func saveConcept(_ concept: FileConcept) throws {
+    let payload = try encode(concept)
+    try queue.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO file_concepts (id, parent_id, name_key, payload_json, created_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id,
+          name_key = excluded.name_key, payload_json = excluded.payload_json
+          """,
+        arguments: [concept.id.uuidString, concept.parentID?.uuidString,
+          RuleCondition.normalize(concept.name), payload, concept.createdAt])
+    }
+  }
+
+  public func deleteConcept(_ conceptID: UUID) throws {
+    try queue.write { db in
+      let children = try Data.fetchAll(db,
+        sql: "SELECT payload_json FROM file_concepts WHERE parent_id = ?",
+        arguments: [conceptID.uuidString])
+      for data in children {
+        var child = try decode(FileConcept.self, from: data)
+        child.parentID = nil
+        try db.execute(
+          sql: "UPDATE file_concepts SET parent_id = NULL, payload_json = ? WHERE id = ?",
+          arguments: [try encode(child), child.id.uuidString])
+      }
+      try db.execute(sql: "DELETE FROM file_concepts WHERE id = ?",
+        arguments: [conceptID.uuidString])
+    }
+  }
+
+  public func conceptExamples(conceptID: UUID) throws -> [ConceptExample] {
+    try queue.read { db in
+      try Data.fetchAll(db,
+        sql: "SELECT payload_json FROM concept_examples WHERE concept_id = ? ORDER BY created_at, id",
+        arguments: [conceptID.uuidString])
+        .map { try decode(ConceptExample.self, from: $0) }
+    }
+  }
+
+  public func saveConceptExample(_ example: ConceptExample) throws {
+    let payload = try encode(example)
+    try queue.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO concept_examples
+          (id, concept_id, item_identity, is_positive, model_version, payload_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(concept_id, item_identity) DO UPDATE SET id = excluded.id,
+          is_positive = excluded.is_positive, model_version = excluded.model_version,
+          payload_json = excluded.payload_json, created_at = excluded.created_at
+          """,
+        arguments: [example.id.uuidString, example.conceptID.uuidString,
+          example.itemIdentity, example.isPositive, example.features.modelVersion,
+          payload, example.createdAt])
+    }
+  }
+
+  public func deleteConceptExample(_ exampleID: UUID) throws {
+    try queue.write { db in
+      try db.execute(sql: "DELETE FROM concept_examples WHERE id = ?",
+        arguments: [exampleID.uuidString])
+    }
+  }
+
   public func saveRule(_ rule: OrganizationRule) throws {
     let payload = try encode(rule)
     try queue.write { db in
@@ -907,6 +1000,7 @@ public final class AppDatabase: @unchecked Sendable {
       "operations", "decision_records", "libraries", "destinations", "organization_rules",
       "learning_events", "learning_samples", "rule_suggestions",
       "rename_proposals", "naming_rules", "naming_samples", "naming_rule_suggestions",
+      "file_concepts", "concept_examples",
     ]
     guard allowed.contains(table) else { throw OrganizerError.persistenceFailed("未知数据表") }
     return try queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)") ?? 0 }
