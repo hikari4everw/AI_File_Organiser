@@ -110,6 +110,7 @@
 ## Review-only implementation checkpoint
 
 - Global concept CRUD, positive/negative examples, bounded PDF/EPUB/image features, pinned local B-LT model download, recognition, concept-aware organization/naming rules, deterministic natural-language concept anchors, and teaching/review UI are implemented on the isolated branch.
+- A fixed-version, local hashed-text feature now supplies reviewable candidates for text-bearing files even when the optional image model is absent. It stores numerical vectors, not extracted text, and does not enable automatic confirmation.
 - Automatic similarity confirmation remains disabled. New-file similarities are candidates requiring explicit review; only an explicit label (plus its ancestors) counts as confirmed for concept rules.
 - A fresh read-only check using the previously frozen `0.35` similarity / `0.02` margin thresholds found 11/11 confident R18 results correct among 20, 20/20 confident scores correct among 20, and **10 false confident classifications among 20 distractor files** (11 readable). The proposed ordinary-manga nested directory provided no eligible new independent readable works after exclusion of previously sampled pages. This fails the agreed precision gate; these fresh items are now examined and cannot be reused as a final untouched holdout.
 - The model threshold is therefore not present in product recognition. A new disjoint ordinary-manga and artbook corpus, plus new unknowns, is still required before enabling automatic confidence or claiming the 95% / 50% acceptance target.

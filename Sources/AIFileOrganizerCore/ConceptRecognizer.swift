@@ -58,19 +58,32 @@ public struct ConceptRecognizer: Sendable {
     }
 
     var candidates: [ConceptCandidate] = []
-    if let query = Self.normalized(features.visualVector) {
+    let queryVisual = Self.normalized(features.visualVector)
+    let queryText = Self.normalized(features.textVector)
+    if queryVisual != nil || queryText != nil {
       for concept in concepts where !negatives.contains(concept.id)
         && !confirmed.contains(concept.id)
       {
-        let relevant = examples.filter {
-          $0.conceptID == concept.id && $0.features.modelVersion == features.modelVersion
-        }
+        let relevant = examples.filter { $0.conceptID == concept.id }
         var positives: [(UUID, Float)] = []
         var negativeScore: Float = -1
         for example in relevant {
-          guard let vector = Self.normalized(example.features.visualVector),
-            vector.count == query.count else { continue }
-          let score = Self.similarity(query, vector)
+          var scores: [Float] = []
+          if let queryVisual,
+            example.features.modelVersion == features.modelVersion,
+            let vector = Self.normalized(example.features.visualVector),
+            vector.count == queryVisual.count
+          {
+            scores.append(Self.similarity(queryVisual, vector))
+          }
+          if let queryText, let textVersion = features.textModelVersion,
+            example.features.textModelVersion == textVersion,
+            let vector = Self.normalized(example.features.textVector),
+            vector.count == queryText.count
+          {
+            scores.append(Self.similarity(queryText, vector))
+          }
+          guard let score = scores.max() else { continue }
           if example.isPositive {
             positives.append((example.id, score))
           } else {

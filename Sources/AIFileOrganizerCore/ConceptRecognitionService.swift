@@ -12,9 +12,11 @@ public struct ConceptRecognitionService: Sendable {
     var results: [UUID: ConceptRecognitionResult] = [:]
     for item in items {
       if Task.isCancelled { break }
-      let features = (try? await extractor?.extract(item: item))
-        ?? ConceptFeatureSnapshot(
-          modelVersion: "manual-only-v1", itemKind: item.kind, visualVector: [])
+      var features = await ConceptTextFeatureExtractor().extract(item: item)
+      if let visual = try? await extractor?.extract(item: item) {
+        features.modelVersion = visual.modelVersion
+        features.visualVector = visual.visualVector
+      }
       let result = ConceptRecognizer().recognize(
         itemIdentity: ConceptIdentity.of(item), features: features,
         concepts: concepts, examples: examples)

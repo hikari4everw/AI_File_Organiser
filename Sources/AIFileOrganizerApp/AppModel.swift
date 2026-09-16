@@ -1055,9 +1055,11 @@ final class AppModel: ObservableObject {
           var result: [(ItemSnapshot, ConceptFeatureSnapshot)] = []
           for item in teachingItems {
             if Task.isCancelled { break }
-            let feature = (try? await extractor?.extract(item: item))
-              ?? ConceptFeatureSnapshot(
-                modelVersion: "manual-only-v1", itemKind: item.kind, visualVector: [])
+            var feature = await ConceptTextFeatureExtractor().extract(item: item)
+            if let visual = try? await extractor?.extract(item: item) {
+              feature.modelVersion = visual.modelVersion
+              feature.visualVector = visual.visualVector
+            }
             result.append((item, feature))
           }
           return (result, manager.isInstalled && provider == nil)
