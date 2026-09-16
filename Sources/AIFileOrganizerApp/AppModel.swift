@@ -23,6 +23,11 @@ final class AppModel: ObservableObject {
   @Published var currentPlan: OrganizationPlan?
   @Published var receipt: ExecutionReceipt?
   @Published var rules: [OrganizationRule] = []
+  @Published var concepts: [FileConcept] = []
+  @Published var recognitionByItem: [UUID: ConceptRecognitionResult] = [:]
+  @Published var conceptModelStatus = "正在检查概念模型…"
+  @Published var isDownloadingConceptModel = false
+  @Published var isTeachingConcept = false
   @Published var ruleDrafts: [RuleDraft] = []
   @Published var namingRules: [NamingRule] = []
   @Published var namingRuleDrafts: [NamingRuleDraft] = []
@@ -44,6 +49,20 @@ final class AppModel: ObservableObject {
     do {
       let database = try AppDatabase.applicationDatabase()
       self.database = database
+      concepts = try database.concepts()
+      conceptModelStatus = ConceptModelManager().isInstalled
+        ? "正在检查本地图像模型…" : "图像概念模型未安装；可先手动教学"
+      if ConceptModelManager().isInstalled {
+        Task { [weak self] in
+          let status = await Task.detached(priority: .utility) { () -> String in
+            do {
+              _ = try ConceptModelManager().provider()
+              return "本地图像概念模型已安装"
+            } catch { return "图像概念模型损坏，请重新下载" }
+          }.value
+          self?.conceptModelStatus = status
+        }
+      }
       if isUITesting {
         try database.clearWorkspaces()
       }
@@ -260,6 +279,7 @@ final class AppModel: ObservableObject {
           root: URL(fileURLWithPath: workspace.libraryPath, isDirectory: true),
           destinations: self.destinations)
         self.namingRules = try database.namingRules(workspaceID: workspace.id)
+        self.concepts = try database.concepts()
         var scanned: [ItemSnapshot] = []
         for try await event in LocalInboxScanner().scan(workspace, sessionID: session.id) {
           try Task.checkCancellation()
@@ -306,6 +326,29 @@ final class AppModel: ObservableObject {
         }
         try Task.checkCancellation()
         try database.saveSnapshots(scanned)
+        let conceptStore = ConceptStore(database: database)
+        let allExamples = try self.concepts.flatMap {
+          try conceptStore.examples(conceptID: $0.id)
+        }
+        let concepts = self.concepts
+        let recognitionTask = Task.detached(priority: .utility) {
+          let manager = ConceptModelManager()
+          let provider = try? manager.provider()
+          let results = await ConceptRecognitionService().recognize(
+            items: scanned, concepts: concepts, examples: allExamples, provider: provider)
+          return (results, manager.isInstalled && provider == nil)
+        }
+        let recognitionOutcome = await withTaskCancellationHandler {
+          await recognitionTask.value
+        } onCancel: {
+          recognitionTask.cancel()
+        }
+        try Task.checkCancellation()
+        let recognitions = recognitionOutcome.0
+        self.recognitionByItem = recognitions
+        if recognitionOutcome.1 {
+          self.conceptModelStatus = "图像概念模型损坏，请重新下载"
+        }
         self.updateSession(.proposing)
         self.statusMessage = "正在生成整理方案…"
         let result = await ClassificationPipeline().run(
@@ -313,6 +356,8 @@ final class AppModel: ObservableObject {
           items: scanned,
           destinations: self.destinations.filter { $0.kind == .category },
           rules: self.rules,
+          concepts: self.concepts,
+          recognitionByItem: recognitions,
           progress: { [weak self] value in
             guard !Task.isCancelled else { return }
             await self?.setProgress(value, sessionID: session.id)
@@ -344,6 +389,8 @@ final class AppModel: ObservableObject {
           items: scanned,
           contextsByItem: result.contextsByItem,
           namingRules: self.namingRules,
+          recognitionByItem: recognitions,
+          concepts: self.concepts,
           styleExamplesByDestination: styleExamples,
           destinationByItem: destinationByItem,
           progress: { [weak self] value in
@@ -856,6 +903,249 @@ final class AppModel: ObservableObject {
     return destinations.first(where: { $0.id == id })?.relativePath ?? "未知目标"
   }
 
+  func installConceptModel() {
+    guard !isDownloadingConceptModel else { return }
+    isDownloadingConceptModel = true
+    conceptModelStatus = "正在下载并校验本地模型…"
+    Task { [weak self] in
+      guard let self else { return }
+      defer { self.isDownloadingConceptModel = false }
+      do {
+        try await Task.detached(priority: .utility) {
+          try await ConceptModelManager().install()
+        }.value
+        self.conceptModelStatus = "本地图像概念模型已安装"
+      } catch {
+        self.conceptModelStatus = "概念模型不可用"
+        self.lastError = error.localizedDescription
+      }
+    }
+  }
+
+  func saveConcept(
+    name: String, description: String, aliases: [String], parentID: UUID?,
+    defaultDestinationID: UUID?, itemIDs: Set<UUID>, externalURLs: [URL]
+  ) -> Bool {
+    guard let database else { return false }
+    if let destinationID = defaultDestinationID {
+      guard workspace != nil,
+        destinations.contains(where: { $0.id == destinationID && $0.kind == .category })
+      else {
+        lastError = "默认目标目录无效"
+        return false
+      }
+    }
+    let concept = FileConcept(
+      name: ConceptLabelParser.name(from: name),
+      description: description, aliases: aliases, parentID: parentID)
+    do {
+      let store = ConceptStore(database: database)
+      try store.save(concept)
+      concepts = try store.concepts()
+      if let destinationID = defaultDestinationID {
+        guard let workspace else { return false }
+        let rule = OrganizationRule(
+          workspaceID: workspace.id,
+          originalText: "\(concept.name) → \(destinationName(destinationID))",
+          condition: RuleCondition(conceptID: concept.id), destinationID: destinationID)
+        try database.saveRule(rule)
+        rules.append(rule)
+      }
+      currentPlan = nil
+      statusMessage = "已保存概念「\(concept.name)」"
+      if !itemIDs.isEmpty || !externalURLs.isEmpty {
+        teachConcept(
+          concept.id, itemIDs: itemIDs, externalURLs: externalURLs, isPositive: true)
+      }
+      return true
+    } catch {
+      lastError = error.localizedDescription
+      return false
+    }
+  }
+
+  func deleteConcept(_ conceptID: UUID) {
+    guard let database else { return }
+    do {
+      let moveRuleIDs = Set(rules.filter {
+        $0.condition.conceptID == conceptID
+      }.map(\.id))
+      let namingRuleIDs = Set(namingRules.filter {
+        $0.condition.conceptID == conceptID
+      }.map(\.id))
+      try ConceptStore(database: database).delete(conceptID)
+      let invalidated = ConceptProposalInvalidator().invalidate(
+        proposals: proposals, renames: renameProposals,
+        moveRuleIDs: moveRuleIDs, namingRuleIDs: namingRuleIDs)
+      proposals = invalidated.proposals
+      renameProposals = invalidated.renames
+      try database.saveProposals(proposals)
+      try database.saveRenameProposals(renameProposals)
+      concepts = try database.concepts()
+      if let workspace {
+        rules = try database.rules(workspaceID: workspace.id)
+        namingRules = try database.namingRules(workspaceID: workspace.id)
+      }
+      currentPlan = nil
+      recognitionByItem = [:]
+      statusMessage = "概念已删除；关联规则已停用"
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func updateConcept(
+    _ conceptID: UUID, name: String, description: String,
+    aliases: [String], parentID: UUID?
+  ) -> Bool {
+    guard let database, var concept = concepts.first(where: { $0.id == conceptID })
+    else { return false }
+    concept.name = name
+    concept.description = description
+    concept.aliases = aliases
+    concept.parentID = parentID
+    do {
+      try ConceptStore(database: database).save(concept)
+      concepts = try database.concepts()
+      let moveIDs = Set(rules.filter { $0.condition.conceptID != nil }.map(\.id))
+      let namingIDs = Set(namingRules.filter { $0.condition.conceptID != nil }.map(\.id))
+      let invalidated = ConceptProposalInvalidator().invalidate(
+        proposals: proposals, renames: renameProposals,
+        moveRuleIDs: moveIDs, namingRuleIDs: namingIDs)
+      proposals = invalidated.proposals
+      renameProposals = invalidated.renames
+      try database.saveProposals(proposals)
+      try database.saveRenameProposals(renameProposals)
+      recognitionByItem = [:]
+      currentPlan = nil
+      statusMessage = "概念已更新，请重新审核现有方案"
+      return true
+    } catch {
+      lastError = error.localizedDescription
+      return false
+    }
+  }
+
+  func teachConcept(
+    _ conceptID: UUID, itemIDs: Set<UUID>, externalURLs: [URL] = [],
+    isPositive: Bool
+  ) {
+    guard let database, !isTeachingConcept,
+      concepts.contains(where: { $0.id == conceptID }) else { return }
+    isTeachingConcept = true
+    let selected = items.filter { itemIDs.contains($0.id) }
+    let access = externalURLs.filter { $0.startAccessingSecurityScopedResource() }
+    let external = externalURLs.compactMap { conceptSnapshot(for: $0) }
+    let teachingItems = selected + external
+    guard !teachingItems.isEmpty else {
+      access.forEach { $0.stopAccessingSecurityScopedResource() }
+      isTeachingConcept = false
+      lastError = "没有可读取的示例文件"
+      return
+    }
+    Task { [weak self] in
+      guard let self else { return }
+      defer {
+        access.forEach { $0.stopAccessingSecurityScopedResource() }
+        self.isTeachingConcept = false
+      }
+      do {
+        let (features, modelFailed) = await Task.detached(priority: .utility) {
+          let manager = ConceptModelManager()
+          let provider = try? manager.provider()
+          let extractor = provider.map { ConceptFeatureExtractor(provider: $0) }
+          var result: [(ItemSnapshot, ConceptFeatureSnapshot)] = []
+          for item in teachingItems {
+            if Task.isCancelled { break }
+            let feature = (try? await extractor?.extract(item: item))
+              ?? ConceptFeatureSnapshot(
+                modelVersion: "manual-only-v1", itemKind: item.kind, visualVector: [])
+            result.append((item, feature))
+          }
+          return (result, manager.isInstalled && provider == nil)
+        }.value
+        if modelFailed { self.conceptModelStatus = "图像概念模型损坏，请重新下载" }
+        let store = ConceptStore(database: database)
+        for (item, feature) in features {
+          try store.teach(ConceptExample(
+            conceptID: conceptID, itemIdentity: ConceptIdentity.of(item),
+            isPositive: isPositive, features: feature))
+        }
+        let concepts = self.concepts
+        let examples = try concepts.flatMap { try store.examples(conceptID: $0.id) }
+        let currentItems = self.items
+        let recognitions = await Task.detached(priority: .utility) {
+          let provider = try? ConceptModelManager().provider()
+          return await ConceptRecognitionService().recognize(
+            items: currentItems, concepts: concepts, examples: examples, provider: provider)
+        }.value
+        self.recognitionByItem = recognitions
+        self.currentPlan = nil
+        self.refreshConceptProposals(for: itemIDs)
+        if !itemIDs.isEmpty {
+          let namingRuleIDs = Set(self.namingRules.filter {
+            $0.condition.conceptID == conceptID
+          }.map(\.id))
+          let invalidated = ConceptProposalInvalidator().invalidate(
+            proposals: self.proposals, renames: self.renameProposals,
+            moveRuleIDs: [], namingRuleIDs: namingRuleIDs, itemIDs: itemIDs)
+          self.renameProposals = invalidated.renames
+          try database.saveRenameProposals(self.renameProposals)
+        }
+        self.statusMessage = "已记录 \(features.count) 个\(isPositive ? "正例" : "反例")；新的相似文件将等待审核"
+      } catch { self.lastError = error.localizedDescription }
+    }
+  }
+
+  private func conceptSnapshot(for url: URL) -> ItemSnapshot? {
+    guard let values = try? url.resourceValues(forKeys: [
+      .isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey, .isPackageKey,
+      .fileSizeKey, .fileResourceIdentifierKey, .volumeIdentifierKey,
+    ]), values.isSymbolicLink != true, values.isPackage != true else { return nil }
+    let kind: ItemKind
+    if values.isDirectory == true { kind = .directory }
+    else if values.isRegularFile == true { kind = .file }
+    else { return nil }
+    return ItemSnapshot(
+      sessionID: session?.id ?? UUID(), path: url.path, name: url.lastPathComponent,
+      kind: kind, fileExtension: url.pathExtension.lowercased(),
+      size: Int64(values.fileSize ?? 0),
+      resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },
+      volumeIdentifier: values.volumeIdentifier.map { String(describing: $0) })
+  }
+
+  private func refreshConceptProposals(for itemIDs: Set<UUID>) {
+    guard let session else { return }
+    let validDestinations = Set(destinations.filter { $0.kind == .category }.map(\.id))
+    for item in items where itemIDs.contains(item.id) && !decisionLocks.contains(item.id) {
+      let context = DeterministicClassifier().context(for: item)
+      let evaluation = RuleEngine().evaluate(
+        item: context, rules: rules,
+        recognition: recognitionByItem[item.id], concepts: concepts)
+      let proposal: ClassificationProposal
+      switch evaluation {
+      case .matchedMove(let ruleID, let destinationID)
+      where validDestinations.contains(destinationID):
+        proposal = ClassificationProposal(
+          sessionID: session.id, itemID: item.id, action: .move,
+          destinationID: destinationID, source: .user, reviewDecision: .ready,
+          reason: "匹配已确认概念的整理规则",
+          evidence: [Evidence(kind: "rule", detail: ruleID.uuidString, weight: 1)])
+      case .matchedKeep:
+        proposal = ClassificationProposal(
+          sessionID: session.id, itemID: item.id, action: .keep,
+          source: .user, reviewDecision: .keep, reason: "匹配用户保留规则")
+      default:
+        proposal = ClassificationProposal(
+          sessionID: session.id, itemID: item.id, action: .keep,
+          source: .user, reviewDecision: .needsReview,
+          reason: "概念已更新，请确认整理目标")
+      }
+      if let index = proposals.firstIndex(where: { $0.itemID == item.id }) {
+        proposals[index] = proposal
+      }
+    }
+    try? database?.saveProposals(proposals)
+  }
+
   func interpretRule(_ text: String) {
     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       !isInterpretingRule
@@ -873,6 +1163,7 @@ final class AppModel: ObservableObject {
         let result = try await RuleInterpretationEngine().interpret(
           text: text,
           destinations: self.destinations,
+          concepts: self.concepts,
           interpreter: interpreter)
         self.ruleDrafts = result.organizationDrafts
         self.namingRuleDrafts = result.namingDrafts
@@ -888,6 +1179,12 @@ final class AppModel: ObservableObject {
     guard draft.condition.hasDeterministicConditions || draft.condition.semanticDescription != nil
     else {
       lastError = "请补全规则条件"
+      return
+    }
+    if let conceptID = draft.condition.conceptID,
+      !concepts.contains(where: { $0.id == conceptID })
+    {
+      lastError = "概念已不存在"
       return
     }
     let destinationID: UUID?
@@ -951,6 +1248,11 @@ final class AppModel: ObservableObject {
       guard draft.condition.hasDeterministicConditions
         || draft.condition.semanticDescription != nil
       else { throw OrganizerError.invalidFilename("请补全命名规则条件") }
+      if let conceptID = draft.condition.conceptID,
+        !concepts.contains(where: { $0.id == conceptID })
+      {
+        throw OrganizerError.invalidFilename("概念已不存在")
+      }
       let rule = NamingRule(
         workspaceID: workspace.id,
         originalText: draft.originalText,
@@ -1031,6 +1333,7 @@ final class AppModel: ObservableObject {
     renameProposals = []
     selectedItemIDs = []
     selectedItemID = nil
+    recognitionByItem = [:]
     decisionLocks = []
     discoveredCount = 0
     skippedCount = 0

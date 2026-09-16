@@ -73,7 +73,7 @@ struct RulesView: View {
                 .labelsHidden()
               VStack(alignment: .leading, spacing: 4) {
                 Text(rule.originalText).fontWeight(.medium)
-                Text("\(actionSummary(rule, model: model)) · \(conditionSummary(rule.condition))")
+                Text("\(actionSummary(rule, model: model)) · \(conditionSummary(rule.condition, concepts: model.concepts))")
                   .font(.caption).foregroundStyle(.secondary)
               }
               Spacer()
@@ -107,7 +107,7 @@ struct RulesView: View {
                     Text("学习建议").font(.caption2).foregroundStyle(.secondary)
                   }
                 }
-                Text("\(conditionSummary(rule.condition)) → \(rule.template.pattern)")
+                Text("\(conditionSummary(rule.condition, concepts: model.concepts)) → \(rule.template.pattern)")
                   .font(.caption).foregroundStyle(.secondary)
               }
               Spacer()
@@ -160,6 +160,12 @@ private struct NamingRuleDraftCard: View {
         get: { draft.condition.contentKeywords.sorted().joined(separator: ", ") },
         set: { draft.condition.contentKeywords = commaSet($0) }))
         .textFieldStyle(.roundedBorder)
+      Picker("已学概念（可选）", selection: $draft.condition.conceptID) {
+        Text("不使用概念").tag(UUID?.none)
+        ForEach(model.concepts) { concept in
+          Text(concept.name).tag(Optional(concept.id))
+        }
+      }
       TextField("需要 AI 判断的含义（可选）", text: Binding(
         get: { draft.condition.semanticDescription ?? "" },
         set: { draft.condition.semanticDescription = $0.isEmpty ? nil : $0 }))
@@ -370,6 +376,12 @@ private struct RuleDraftCard: View {
         get: { draft.condition.contentKeywords.sorted().joined(separator: ", ") },
         set: { draft.condition.contentKeywords = commaSet($0) }))
         .textFieldStyle(.roundedBorder)
+      Picker("已学概念（可选）", selection: $draft.condition.conceptID) {
+        Text("不使用概念").tag(UUID?.none)
+        ForEach(model.concepts) { concept in
+          Text(concept.name).tag(Optional(concept.id))
+        }
+      }
       TextField("需要 AI 判断的含义（可选）", text: Binding(
         get: { draft.condition.semanticDescription ?? "" },
         set: { draft.condition.semanticDescription = $0.isEmpty ? nil : $0 }))
@@ -400,8 +412,11 @@ private struct RuleDraftCard: View {
   }
 }
 
-private func conditionSummary(_ condition: RuleCondition) -> String {
+private func conditionSummary(_ condition: RuleCondition, concepts: [FileConcept]) -> String {
   var parts: [String] = []
+  if let conceptID = condition.conceptID {
+    parts.append("概念：" + (concepts.first(where: { $0.id == conceptID })?.name ?? "已删除"))
+  }
   if !condition.itemKinds.isEmpty { parts.append(condition.itemKinds.map(\.rawValue).sorted().joined(separator: ",")) }
   if !condition.fileExtensions.isEmpty { parts.append(condition.fileExtensions.sorted().map { ".\($0)" }.joined(separator: ",")) }
   if !condition.filenameKeywords.isEmpty { parts.append("名称含：" + condition.filenameKeywords.sorted().joined(separator: ",")) }

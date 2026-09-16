@@ -689,6 +689,25 @@ public final class AppDatabase: @unchecked Sendable {
 
   public func deleteConcept(_ conceptID: UUID) throws {
     try queue.write { db in
+      let organizationRows = try Data.fetchAll(
+        db, sql: "SELECT payload_json FROM organization_rules")
+      for data in organizationRows {
+        var rule = try decode(OrganizationRule.self, from: data)
+        guard rule.condition.conceptID == conceptID, rule.isEnabled else { continue }
+        rule.isEnabled = false
+        try db.execute(
+          sql: "UPDATE organization_rules SET is_enabled = 0, payload_json = ? WHERE id = ?",
+          arguments: [try encode(rule), rule.id.uuidString])
+      }
+      let namingRows = try Data.fetchAll(db, sql: "SELECT payload_json FROM naming_rules")
+      for data in namingRows {
+        var rule = try decode(NamingRule.self, from: data)
+        guard rule.condition.conceptID == conceptID, rule.isEnabled else { continue }
+        rule.isEnabled = false
+        try db.execute(
+          sql: "UPDATE naming_rules SET is_enabled = 0, payload_json = ? WHERE id = ?",
+          arguments: [try encode(rule), rule.id.uuidString])
+      }
       let children = try Data.fetchAll(db,
         sql: "SELECT payload_json FROM file_concepts WHERE parent_id = ?",
         arguments: [conceptID.uuidString])

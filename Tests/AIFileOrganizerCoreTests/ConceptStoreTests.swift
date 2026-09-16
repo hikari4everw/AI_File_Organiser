@@ -4,6 +4,48 @@ import Testing
 @testable import AIFileOrganizerCore
 
 @Suite struct ConceptStoreTests {
+  @Test func manualExampleConfirmsSameItemWithoutModel() throws {
+    let store = ConceptStore(database: try AppDatabase.inMemory())
+    let concept = FileConcept(name: "银行账单")
+    try store.save(concept)
+    let snapshot = ItemSnapshot(
+      sessionID: UUID(), path: "/tmp/statement.pdf", name: "statement.pdf",
+      kind: .file, resourceIdentifier: "123", volumeIdentifier: "disk")
+    let identity = ConceptIdentity.of(snapshot)
+    try store.teach(ConceptExample(
+      conceptID: concept.id, itemIdentity: identity, isPositive: true,
+      features: ConceptFeatureSnapshot(
+        modelVersion: "manual-only-v1", itemKind: .file, visualVector: [])))
+    let result = ConceptRecognizer().recognize(
+      itemIdentity: identity,
+      features: ConceptFeatureSnapshot(
+        modelVersion: "manual-only-v1", itemKind: .file, visualVector: []),
+      concepts: [concept], examples: try store.examples(conceptID: concept.id))
+    #expect(result.confirmedConceptIDs == [concept.id])
+  }
+
+  @Test func deletingConceptDisablesReferencingRules() throws {
+    let database = try AppDatabase.inMemory()
+    let store = ConceptStore(database: database)
+    let workspaceID = UUID()
+    let concept = FileConcept(name: "发票")
+    try store.save(concept)
+    let move = OrganizationRule(
+      workspaceID: workspaceID, originalText: "发票放 Finance",
+      condition: RuleCondition(conceptID: concept.id), destinationID: UUID())
+    let naming = NamingRule(
+      workspaceID: workspaceID, originalText: "发票加前缀",
+      condition: RuleCondition(conceptID: concept.id),
+      operations: [.removeLiteralPrefix("x")])
+    try database.saveRule(move)
+    try database.saveNamingRule(naming)
+
+    try store.delete(concept.id)
+
+    #expect(try database.rules(workspaceID: workspaceID).first?.isEnabled == false)
+    #expect(try database.namingRules(workspaceID: workspaceID).first?.isEnabled == false)
+  }
+
   @Test func explicitExamplesSurviveRestartWithoutSourceFile() throws {
     let path = FileManager.default.temporaryDirectory
       .appendingPathComponent("\(UUID().uuidString).sqlite").path

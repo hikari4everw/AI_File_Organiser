@@ -106,3 +106,10 @@
 
 - The user requested continuation. The stronger B-LT model was downloaded to a temporary directory, passed SHA-256 verification, and loaded in Core ML. On the same *already examined* 60-item split, it gave 42/43 correct confident predictions (97.7%) with 43/60 coverage (71.7%); R18 12/12, ordinary manga 10/11, and scores 20/20. This is a screening comparison, not an independent final acceptance result.
 - Model-independent concept storage and explicit positive/negative correction can proceed while fresh ordinary-manga and artbook works are sought. Keep automatic concept confidence disabled until the agreed 95% / 50% gate is verified on a new holdout.
+
+## Review-only implementation checkpoint
+
+- Global concept CRUD, positive/negative examples, bounded PDF/EPUB/image features, pinned local B-LT model download, recognition, concept-aware organization/naming rules, deterministic natural-language concept anchors, and teaching/review UI are implemented on the isolated branch.
+- Automatic similarity confirmation remains disabled. New-file similarities are candidates requiring explicit review; only an explicit label (plus its ancestors) counts as confirmed for concept rules.
+- A fresh read-only check using the previously frozen `0.35` similarity / `0.02` margin thresholds found 11/11 confident R18 results correct among 20, 20/20 confident scores correct among 20, and **10 false confident classifications among 20 distractor files** (11 readable). The proposed ordinary-manga nested directory provided no eligible new independent readable works after exclusion of previously sampled pages. This fails the agreed precision gate; these fresh items are now examined and cannot be reused as a final untouched holdout.
+- The model threshold is therefore not present in product recognition. A new disjoint ordinary-manga and artbook corpus, plus new unknowns, is still required before enabling automatic confidence or claiming the 95% / 50% acceptance target.

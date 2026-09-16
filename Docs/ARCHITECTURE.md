@@ -7,6 +7,8 @@
 ```text
 安全书签 → LocalInboxScanner → ItemSnapshot
                             ↓
+         ConceptFeatureExtractor → ConceptRecognizer
+                            ↓ 已确认概念 / 待审核候选
 四层 DestinationCatalog → 规则 + 资料库画像 + DeterministicClassifier
                             ↓ 模糊项
  NativeContentExtractor / DirectoryAnalyzer → Foundation Models
@@ -47,6 +49,12 @@ GRDB 还持久化目标目录、用户规则、学习事件和样本。计划与
 - 普通目录移动前保存有界递归清单；内部内容变化会阻止撤销。
 
 ## 规则与学习
+
+`ConceptStore` 在全局 SQLite 表中保存概念及用户明确给出的正例、反例；特征快照只保存模型版本和数值向量，不保存页面图像。概念可有一个上级，一个文件可有多个概念。目标目录和基于概念的整理规则仍属于工作区。删除概念会停用引用它的整理和命名规则，并清除示例。
+
+`ConceptFeatureExtractor` 最多读取五个代表页面，目录搜索限制两层和 200 项，跳过符号链接、应用包和云端占位文件。`ConceptRecognizer` 先处理明确标签，再把相似文件列为待审核候选；当前未启用自动相似确认。概念条件只接受已确认标签，未知目标或规则冲突不会产生可执行路径。明确概念没有适用目标时，项目仍留在审核中。命名规则沿用原有文件名校验和独立审核。
+
+自然语言中的已知概念和现有目标目录能直接生成概念规则草稿，不调用语言模型重新猜扩展名或关键词；别名或目标有歧义时草稿保持不完整，需用户选择。
 
 自然语言通过 Apple Foundation Models guided generation 转成 `RuleDraft`。草稿中的条件与目标可编辑，只有用户点击保存才成为 `OrganizationRule`。确定性条件优先执行；不同规则命中不同目标时强制审核；语义条件作为模型提示但不会绕过决策策略。
 

@@ -5,15 +5,18 @@ public struct ClassificationPipelineResult: Sendable {
   public var folderProposals: [FolderProposal]
   public var modelStatus: String
   public var contextsByItem: [UUID: ItemContext]
+  public var recognitionByItem: [UUID: ConceptRecognitionResult]
 
   public init(
     proposals: [ClassificationProposal], folderProposals: [FolderProposal], modelStatus: String,
-    contextsByItem: [UUID: ItemContext] = [:]
+    contextsByItem: [UUID: ItemContext] = [:],
+    recognitionByItem: [UUID: ConceptRecognitionResult] = [:]
   ) {
     self.proposals = proposals
     self.folderProposals = folderProposals
     self.modelStatus = modelStatus
     self.contextsByItem = contextsByItem
+    self.recognitionByItem = recognitionByItem
   }
 }
 
@@ -42,13 +45,17 @@ public struct ClassificationPipeline: Sendable {
     sessionID: UUID,
     items: [ItemSnapshot],
     destinations: [DestinationProfile],
-    rules: [OrganizationRule] = []
+    rules: [OrganizationRule] = [],
+    concepts: [FileConcept] = [],
+    recognitionByItem: [UUID: ConceptRecognitionResult] = [:]
   ) async -> ClassificationPipelineResult {
     await run(
       sessionID: sessionID,
       items: items,
       destinations: destinations,
       rules: rules,
+      concepts: concepts,
+      recognitionByItem: recognitionByItem,
       progress: { _ in }
     )
   }
@@ -58,6 +65,8 @@ public struct ClassificationPipeline: Sendable {
     items: [ItemSnapshot],
     destinations: [DestinationProfile],
     rules: [OrganizationRule] = [],
+    concepts: [FileConcept] = [],
+    recognitionByItem: [UUID: ConceptRecognitionResult] = [:],
     progress: @escaping OrganizationProgressHandler
   ) async -> ClassificationPipelineResult {
     var final: [UUID: ClassificationProposal] = [:]
@@ -75,7 +84,9 @@ public struct ClassificationPipeline: Sendable {
       if Task.isCancelled { break }
       let basic = classifier.context(for: item)
       contextsByItem[item.id] = basic
-      let basicRule = ruleEngine.evaluate(item: basic, rules: rules)
+      let recognition = recognitionByItem[item.id]
+      let basicRule = ruleEngine.evaluate(
+        item: basic, rules: rules, recognition: recognition, concepts: concepts)
       if case .matchedMove(let ruleID, let destinationID) = basicRule,
         validDestinationIDs.contains(destinationID)
       {
@@ -108,7 +119,8 @@ public struct ClassificationPipeline: Sendable {
       }
       let candidates = classifier.rank(basic, destinations: destinations)
       candidatesByItem[item.id] = candidates
-      if let proposal = classifier.proposal(
+      if recognition?.status == .unknown || recognition == nil,
+        let proposal = classifier.proposal(
         sessionID: sessionID, item: basic, candidates: candidates),
         proposal.reviewDecision == .ready
       {
@@ -124,7 +136,8 @@ public struct ClassificationPipeline: Sendable {
           directorySummary: summary
         )
         contextsByItem[item.id] = enriched
-        let enrichedRule = ruleEngine.evaluate(item: enriched, rules: rules)
+        let enrichedRule = ruleEngine.evaluate(
+          item: enriched, rules: rules, recognition: recognition, concepts: concepts)
         if case .matchedMove(let ruleID, let destinationID) = enrichedRule,
           validDestinationIDs.contains(destinationID)
         {
@@ -152,6 +165,22 @@ public struct ClassificationPipeline: Sendable {
           if !Task.isCancelled {
             await progress(.init(phase: .analyzing, completed: index + 1, total: items.count,
               isCancellable: true))
+          }
+          continue
+        }
+        let hasSemanticRule: Bool
+        if case .semanticCandidates = enrichedRule { hasSemanticRule = true }
+        else { hasSemanticRule = false }
+        if let recognition, recognition.status != .unknown, !hasSemanticRule {
+          let reason = recognition.confirmedConceptIDs.isEmpty
+            ? "找到相似概念，请先确认文件类型和目标"
+            : "已识别文件概念，但没有适用的整理规则，请选择目标"
+          final[item.id] = ClassificationProposal(
+            sessionID: sessionID, itemID: item.id, action: .keep,
+            source: .user, reviewDecision: .needsReview, reason: reason)
+          if !Task.isCancelled {
+            await progress(.init(phase: .analyzing, completed: index + 1,
+              total: items.count, isCancellable: true))
           }
           continue
         }
@@ -233,6 +262,8 @@ public struct ClassificationPipeline: Sendable {
       if let model = modelByItem[context.id] {
         let decision =
           context.snapshot.isCloudPlaceholder
+            || recognitionByItem[context.id]?.status == .needsReview
+            || recognitionByItem[context.id]?.status == .confirmed
           ? ReviewDecision.needsReview
           : policy.evaluate(proposal: model, deterministicCandidates: candidates)
         final[context.id] = ClassificationProposal(
@@ -270,7 +301,7 @@ public struct ClassificationPipeline: Sendable {
     let folderProposals = Self.coalesceFolderProposals(sessionID: sessionID, proposals: proposals)
     return ClassificationPipelineResult(
       proposals: proposals, folderProposals: folderProposals, modelStatus: modelStatus,
-      contextsByItem: contextsByItem)
+      contextsByItem: contextsByItem, recognitionByItem: recognitionByItem)
   }
 
   private static func ruleProposal(

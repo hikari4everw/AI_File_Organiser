@@ -27,6 +27,8 @@ public struct FilenameSuggestionPipeline: Sendable {
     items: [ItemSnapshot],
     contextsByItem initialContexts: [UUID: ItemContext] = [:],
     namingRules: [NamingRule] = [],
+    recognitionByItem: [UUID: ConceptRecognitionResult] = [:],
+    concepts: [FileConcept] = [],
     requestedItemIDs: Set<UUID> = [],
     styleExamplesByDestination: [UUID: [String]] = [:],
     destinationByItem: [UUID: UUID] = [:],
@@ -66,7 +68,10 @@ public struct FilenameSuggestionPipeline: Sendable {
     let ruleEngine = NamingRuleEngine()
     var semanticEvaluationsByItem: [UUID: [UUID: SemanticNamingConditionEvaluation]] = [:]
     for context in candidateContexts {
-      for rule in ruleEngine.semanticCandidateRules(context: context, rules: namingRules) {
+      for rule in ruleEngine.semanticCandidateRules(
+        context: context, rules: namingRules,
+        recognition: recognitionByItem[context.id])
+      {
         let evaluation: SemanticNamingConditionEvaluation
         if semanticEvaluator.isAvailable {
           do {
@@ -89,7 +94,8 @@ public struct FilenameSuggestionPipeline: Sendable {
     }
     var byItem = Dictionary(uniqueKeysWithValues: ruleEngine.proposals(
       sessionID: sessionID, contexts: candidateContexts, rules: namingRules,
-      semanticEvaluationsByItem: semanticEvaluationsByItem
+      semanticEvaluationsByItem: semanticEvaluationsByItem,
+      recognitionByItem: recognitionByItem, concepts: concepts
     ).map { ($0.itemID, $0) })
 
     var requests: [FilenameSuggestionRequest] = []

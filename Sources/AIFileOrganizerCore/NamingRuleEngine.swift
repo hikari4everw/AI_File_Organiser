@@ -7,12 +7,16 @@ public struct NamingRuleEngine: Sendable {
     sessionID: UUID,
     contexts: [ItemContext],
     rules: [NamingRule],
-    semanticEvaluationsByItem: [UUID: [UUID: SemanticNamingConditionEvaluation]] = [:]
+    semanticEvaluationsByItem: [UUID: [UUID: SemanticNamingConditionEvaluation]] = [:],
+    recognitionByItem: [UUID: ConceptRecognitionResult] = [:],
+    concepts: [FileConcept] = []
   ) -> [RenameProposal] {
     contexts.compactMap { context -> RenameProposal? in
       guard context.snapshot.kind != .applicationBundle else { return nil }
       let candidates = rules.filter {
-        $0.isEnabled && !$0.operations.isEmpty && conditionMatches($0.condition, context: context)
+        $0.isEnabled && !$0.operations.isEmpty
+          && conditionMatches(
+            $0.condition, context: context, recognition: recognitionByItem[context.id])
       }
       var matches: [NamingRule] = []
       var unresolved: [(rule: NamingRule, reason: String)] = []
@@ -37,6 +41,14 @@ public struct NamingRuleEngine: Sendable {
           sessionID: sessionID, context: context,
           ruleID: unresolved.count == 1 ? first.rule.id : nil,
           reason: "命名规则语义判断不确定：\(first.reason)")
+      }
+      let parentByID = Dictionary(uniqueKeysWithValues: concepts.map { ($0.id, $0.parentID) })
+      let matchedIDs = Set(matches.compactMap(\.condition.conceptID))
+      matches.removeAll { rule in
+        guard let conceptID = rule.condition.conceptID else { return false }
+        return matchedIDs.contains { otherID in
+          otherID != conceptID && isAncestor(conceptID, of: otherID, parentByID: parentByID)
+        }
       }
       guard !matches.isEmpty else { return nil }
       let fields = fields(for: context)
@@ -93,12 +105,13 @@ public struct NamingRuleEngine: Sendable {
   }
 
   public func semanticCandidateRules(
-    context: ItemContext, rules: [NamingRule]
+    context: ItemContext, rules: [NamingRule],
+    recognition: ConceptRecognitionResult? = nil
   ) -> [NamingRule] {
     guard context.snapshot.kind != .applicationBundle else { return [] }
     return rules.filter {
       $0.isEnabled && !$0.operations.isEmpty && $0.condition.semanticDescription != nil
-        && conditionMatches($0.condition, context: context)
+        && conditionMatches($0.condition, context: context, recognition: recognition)
     }
   }
 
@@ -130,7 +143,15 @@ public struct NamingRuleEngine: Sendable {
     return URL(fileURLWithPath: item.name).deletingPathExtension().lastPathComponent
   }
 
-  private func conditionMatches(_ condition: RuleCondition, context: ItemContext) -> Bool {
+  private func conditionMatches(
+    _ condition: RuleCondition, context: ItemContext,
+    recognition: ConceptRecognitionResult?
+  ) -> Bool {
+    if let conceptID = condition.conceptID,
+      recognition?.confirmedConceptIDs.contains(conceptID) != true
+    {
+      return false
+    }
     if !condition.itemKinds.isEmpty, !condition.itemKinds.contains(context.snapshot.kind) {
       return false
     }
@@ -179,5 +200,18 @@ public struct NamingRuleEngine: Sendable {
       if case .renderTemplate = operation { return false }
       return true
     }
+  }
+
+  private func isAncestor(
+    _ ancestorID: UUID, of childID: UUID, parentByID: [UUID: UUID?]
+  ) -> Bool {
+    var current = parentByID[childID] ?? nil
+    var visited: Set<UUID> = [childID]
+    while let id = current, !visited.contains(id) {
+      if id == ancestorID { return true }
+      visited.insert(id)
+      current = parentByID[id] ?? nil
+    }
+    return false
   }
 }

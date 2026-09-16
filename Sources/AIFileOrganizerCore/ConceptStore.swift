@@ -43,7 +43,8 @@ public struct ConceptStore: Sendable {
       throw OrganizerError.persistenceFailed("概念不存在")
     }
     guard !example.itemIdentity.isEmpty, !example.features.modelVersion.isEmpty,
-      !example.features.visualVector.isEmpty,
+      (!example.features.visualVector.isEmpty
+        || example.features.modelVersion == "manual-only-v1"),
       example.features.visualVector.allSatisfy(\.isFinite)
     else { throw OrganizerError.persistenceFailed("样本特征无效") }
     try database.saveConceptExample(example)

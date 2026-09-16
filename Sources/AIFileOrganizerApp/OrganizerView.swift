@@ -30,6 +30,8 @@ struct OrganizerView: View {
           }
         case .rules:
           RulesView(model: model)
+        case .concepts:
+          ConceptsView(model: model)
         case .history:
           HistoryView(model: model) { page = .plan }
         }
@@ -249,6 +251,38 @@ struct OrganizerView: View {
             LabeledContent(
               "大小", value: ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))
             LabeledContent("目标", value: model.destinationName(proposal.destinationID))
+            if let recognition = model.recognitionByItem[item.id] {
+              Divider()
+              Text("文件概念").font(.headline)
+              if recognition.confirmedConceptIDs.isEmpty, recognition.candidates.isEmpty {
+                Text("尚未识别").foregroundStyle(.secondary)
+              }
+              ForEach(model.concepts.filter {
+                recognition.confirmedConceptIDs.contains($0.id)
+              }) { concept in
+                HStack {
+                  Label(concept.name, systemImage: "checkmark.seal")
+                  Spacer()
+                  Button("纠正") {
+                    model.teachConcept(concept.id, itemIDs: [item.id], isPositive: false)
+                  }
+                }
+              }
+              ForEach(recognition.candidates.prefix(3), id: \.conceptID) { candidate in
+                if let concept = model.concepts.first(where: { $0.id == candidate.conceptID }) {
+                  HStack {
+                    Text("可能是 \(concept.name)")
+                    Spacer()
+                    Button("确认") {
+                      model.teachConcept(concept.id, itemIDs: [item.id], isPositive: true)
+                    }
+                    Button("排除") {
+                      model.teachConcept(concept.id, itemIDs: [item.id], isPositive: false)
+                    }
+                  }
+                }
+              }
+            }
             Divider()
             Text("为什么这样建议").font(.headline)
             Text(proposal.reason).foregroundStyle(.secondary)
@@ -332,13 +366,13 @@ struct OrganizerView: View {
 }
 
 private enum OrganizerPage: String, CaseIterable, Identifiable {
-  case plan, rules, history
+  case plan, concepts, rules, history
   var id: String { rawValue }
   var title: String {
-    switch self { case .plan: "整理计划"; case .rules: "我的规则"; case .history: "历史与撤销" }
+    switch self { case .plan: "整理计划"; case .concepts: "文件概念"; case .rules: "我的规则"; case .history: "历史与撤销" }
   }
   var icon: String {
-    switch self { case .plan: "rectangle.3.group"; case .rules: "text.badge.checkmark"; case .history: "clock.arrow.circlepath" }
+    switch self { case .plan: "rectangle.3.group"; case .concepts: "square.stack.3d.up"; case .rules: "text.badge.checkmark"; case .history: "clock.arrow.circlepath" }
   }
 }
 

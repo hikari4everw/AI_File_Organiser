@@ -10,13 +10,15 @@ public struct RuleCondition: Codable, Hashable, Sendable {
   public var filenameKeywords: Set<String>
   public var contentKeywords: Set<String>
   public var semanticDescription: String?
+  public var conceptID: UUID?
 
   public init(
     itemKinds: Set<ItemKind> = [],
     fileExtensions: Set<String> = [],
     filenameKeywords: Set<String> = [],
     contentKeywords: Set<String> = [],
-    semanticDescription: String? = nil
+    semanticDescription: String? = nil,
+    conceptID: UUID? = nil
   ) {
     self.itemKinds = itemKinds
     self.fileExtensions = Set(fileExtensions.map { $0.lowercased() })
@@ -24,11 +26,12 @@ public struct RuleCondition: Codable, Hashable, Sendable {
     self.contentKeywords = Set(contentKeywords.map(Self.normalize))
     let semantic = semanticDescription?.trimmingCharacters(in: .whitespacesAndNewlines)
     self.semanticDescription = semantic?.isEmpty == false ? semantic : nil
+    self.conceptID = conceptID
   }
 
   public var hasDeterministicConditions: Bool {
     !itemKinds.isEmpty || !fileExtensions.isEmpty || !filenameKeywords.isEmpty
-      || !contentKeywords.isEmpty
+      || !contentKeywords.isEmpty || conceptID != nil
   }
 
   static func normalize(_ value: String) -> String {

@@ -32,6 +32,76 @@ private actor ProgressRecorder {
 }
 
 @Suite struct ClassificationTests {
+  @Test func conceptCandidateStillAllowsIndependentSemanticRuleToSuggestInReview() async {
+    let session = UUID()
+    let item = ItemSnapshot(
+      sessionID: session, path: "/tmp/document.pdf", name: "document.pdf", kind: .file)
+    let concept = FileConcept(name: "账单")
+    let destination = DestinationProfile(
+      relativePath: "Finance", displayName: "Finance", keywords: [])
+    let semantic = OrganizationRule(
+      workspaceID: UUID(), originalText: "财务材料放 Finance",
+      condition: RuleCondition(semanticDescription: "财务材料"),
+      destinationID: destination.id)
+    let recognition = ConceptRecognitionResult(
+      itemIdentity: item.path, status: .needsReview,
+      confirmedConceptIDs: [], candidates: [ConceptCandidate(
+        conceptID: concept.id, similarity: 0.8, supportingExampleIDs: [])])
+    let provider = MockProvider(result: [ModelProposal(
+      itemID: item.id, action: .move, destinationID: destination.id,
+      reason: "匹配独立语义规则")])
+    let result = await ClassificationPipeline(
+      extractor: EmptyExtractor(), provider: provider
+    ).run(
+      sessionID: session, items: [item], destinations: [destination],
+      rules: [semantic], concepts: [concept],
+      recognitionByItem: [item.id: recognition])
+    #expect(result.proposals.first?.destinationID == destination.id)
+    #expect(result.proposals.first?.reviewDecision == .needsReview)
+  }
+
+  @Test func taughtConceptRoutesOnlyThroughItsRule() async {
+    let session = UUID()
+    let item = ItemSnapshot(
+      sessionID: session, path: "/tmp/lecture.pdf", name: "lecture.pdf", kind: .file)
+    let concept = FileConcept(name: "讲义")
+    let destination = DestinationProfile(
+      relativePath: "Study", displayName: "Study", keywords: [])
+    let route = OrganizationRule(
+      workspaceID: UUID(), originalText: "讲义放 Study",
+      condition: RuleCondition(conceptID: concept.id), destinationID: destination.id)
+    let recognition = ConceptRecognitionResult(
+      itemIdentity: item.path, status: .confirmed,
+      confirmedConceptIDs: [concept.id], candidates: [])
+    let result = await ClassificationPipeline(
+      extractor: EmptyExtractor(), provider: UnavailableProvider()
+    ).run(
+      sessionID: session, items: [item], destinations: [destination],
+      rules: [route], concepts: [concept], recognitionByItem: [item.id: recognition])
+    #expect(result.proposals.first?.destinationID == destination.id)
+    #expect(result.proposals.first?.reviewDecision == .ready)
+  }
+
+  @Test func knownConceptWithoutRouteWaitsForReview() async {
+    let session = UUID()
+    let item = ItemSnapshot(
+      sessionID: session, path: "/tmp/lecture.pdf", name: "lecture.pdf", kind: .file)
+    let concept = FileConcept(name: "讲义")
+    let destination = DestinationProfile(
+      relativePath: "Study", displayName: "Study", keywords: ["lecture", "pdf"])
+    let recognition = ConceptRecognitionResult(
+      itemIdentity: item.path, status: .confirmed,
+      confirmedConceptIDs: [concept.id], candidates: [])
+    let result = await ClassificationPipeline(
+      extractor: EmptyExtractor(), provider: UnavailableProvider()
+    ).run(
+      sessionID: session, items: [item], destinations: [destination],
+      concepts: [concept], recognitionByItem: [item.id: recognition])
+    #expect(result.proposals.first?.action == .keep)
+    #expect(result.proposals.first?.reviewDecision == .needsReview)
+    #expect(result.proposals.first?.destinationID == nil)
+  }
+
   @Test func deterministicImageClassificationIsReady() {
     let session = UUID()
     let item = ItemSnapshot(
