@@ -114,3 +114,11 @@
 - Automatic similarity confirmation remains disabled. New-file similarities are candidates requiring explicit review; only an explicit label (plus its ancestors) counts as confirmed for concept rules.
 - A fresh read-only check using the previously frozen `0.35` similarity / `0.02` margin thresholds found 11/11 confident R18 results correct among 20, 20/20 confident scores correct among 20, and **10 false confident classifications among 20 distractor files** (11 readable). The proposed ordinary-manga nested directory provided no eligible new independent readable works after exclusion of previously sampled pages. This fails the agreed precision gate; these fresh items are now examined and cannot be reused as a final untouched holdout.
 - The model threshold is therefore not present in product recognition. A new disjoint ordinary-manga and artbook corpus, plus new unknowns, is still required before enabling automatic confidence or claiming the 95% / 50% acceptance target.
+
+## Completion audit (2026-09-21)
+
+- Tasks 2–5 are complete for the review-only product path. Users can now replace an already confirmed concept directly; teaching immediately invalidates unexecuted plans and blocks preparation or execution until recognition refresh finishes.
+- Changing a child concept invalidates naming suggestions derived from any ancestor that is no longer confirmed. Deleted concepts are rejected at both organization and naming rule-engine boundaries, including stale recognition-cache input.
+- The Xcode project now gives the App and SwiftPM the same module name and uses the correct test host. UI tests use a temporary database and do not write test concepts into the user's application database.
+- Final verification passed 175 Swift unit tests in 22 suites, 11 core safety checks, and the Xcode scheme with the same 175 unit tests plus 6 UI tests.
+- Tasks 1 and 6 remain incomplete only at the independent corpus gate. No untouched, disjoint set currently covers ordinary manga, distinct artbooks, piano scores, and unknowns after the examined pilots. Automatic similarity confidence therefore remains disabled; candidates continue to require explicit review.
