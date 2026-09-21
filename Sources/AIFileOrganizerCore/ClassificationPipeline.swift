@@ -263,6 +263,7 @@ public struct ClassificationPipeline: Sendable {
         let decision =
           context.snapshot.isCloudPlaceholder
             || recognitionByItem[context.id]?.status == .needsReview
+            || recognitionByItem[context.id]?.status == .confident
             || recognitionByItem[context.id]?.status == .confirmed
           ? ReviewDecision.needsReview
           : policy.evaluate(proposal: model, deterministicCandidates: candidates)

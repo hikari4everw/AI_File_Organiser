@@ -44,7 +44,7 @@ private actor ProgressRecorder {
       condition: RuleCondition(semanticDescription: "财务材料"),
       destinationID: destination.id)
     let recognition = ConceptRecognitionResult(
-      itemIdentity: item.path, status: .needsReview,
+      itemIdentity: item.path, status: .confident,
       confirmedConceptIDs: [], candidates: [ConceptCandidate(
         conceptID: concept.id, similarity: 0.8, supportingExampleIDs: [])])
     let provider = MockProvider(result: [ModelProposal(

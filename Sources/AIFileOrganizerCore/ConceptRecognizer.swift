@@ -1,7 +1,7 @@
 import Foundation
 
 public enum ConceptRecognitionStatus: String, Codable, Hashable, Sendable {
-  case confirmed, needsReview, unknown
+  case confirmed, confident, needsReview, unknown
 }
 
 public struct ConceptCandidate: Codable, Hashable, Sendable {
@@ -58,6 +58,7 @@ public struct ConceptRecognizer: Sendable {
     }
 
     var candidates: [ConceptCandidate] = []
+    var calibratedVisualScores: [(conceptID: UUID, score: Float)] = []
     let queryVisual = Self.normalized(features.visualVector)
     let queryText = Self.normalized(features.textVector)
     if queryVisual != nil || queryText != nil {
@@ -67,6 +68,8 @@ public struct ConceptRecognizer: Sendable {
         let relevant = examples.filter { $0.conceptID == concept.id }
         var positives: [(UUID, Float)] = []
         var negativeScore: Float = -1
+        var positiveVisuals: [(UUID, Float)] = []
+        var negativeVisualScore: Float = -1
         for example in relevant {
           var scores: [Float] = []
           if let queryVisual,
@@ -74,7 +77,13 @@ public struct ConceptRecognizer: Sendable {
             let vector = Self.normalized(example.features.visualVector),
             vector.count == queryVisual.count
           {
-            scores.append(Self.similarity(queryVisual, vector))
+            let score = Self.similarity(queryVisual, vector)
+            scores.append(score)
+            if example.isPositive {
+              positiveVisuals.append((example.id, score))
+            } else {
+              negativeVisualScore = max(negativeVisualScore, score)
+            }
           }
           if let queryText, let textVersion = features.textModelVersion,
             example.features.textModelVersion == textVersion,
@@ -88,6 +97,17 @@ public struct ConceptRecognizer: Sendable {
             positives.append((example.id, score))
           } else {
             negativeScore = max(negativeScore, score)
+          }
+        }
+        positiveVisuals.sort { lhs, rhs in
+          lhs.1 == rhs.1 ? lhs.0.uuidString < rhs.0.uuidString : lhs.1 > rhs.1
+        }
+        let bestVisuals = positiveVisuals.prefix(3)
+        if !bestVisuals.isEmpty {
+          let visualScore = bestVisuals.reduce(Float(0)) { $0 + $1.1 }
+            / Float(bestVisuals.count)
+          if visualScore > 0, visualScore > negativeVisualScore {
+            calibratedVisualScores.append((concept.id, visualScore))
           }
         }
         positives.sort { lhs, rhs in
@@ -107,8 +127,19 @@ public struct ConceptRecognizer: Sendable {
         ? lhs.conceptID.uuidString < rhs.conceptID.uuidString
         : lhs.similarity > rhs.similarity
     }
+    calibratedVisualScores.sort { lhs, rhs in
+      lhs.score == rhs.score
+        ? lhs.conceptID.uuidString < rhs.conceptID.uuidString
+        : lhs.score > rhs.score
+    }
+    let visualTop = calibratedVisualScores.first
+    let visualSecond = calibratedVisualScores.dropFirst().first?.score ?? 0
+    let isConfident = features.modelVersion == ConceptModelManager.modelVersion
+      && candidates.first?.conceptID == visualTop?.conceptID
+      && (visualTop?.score ?? 0) >= 0.75
+      && (visualTop?.score ?? 0) - visualSecond >= 0.02
     let status: ConceptRecognitionStatus = !confirmed.isEmpty ? .confirmed
-      : (candidates.isEmpty ? .unknown : .needsReview)
+      : (candidates.isEmpty ? .unknown : (isConfident ? .confident : .needsReview))
     return ConceptRecognitionResult(
       itemIdentity: itemIdentity, status: status,
       confirmedConceptIDs: confirmed, candidates: candidates)

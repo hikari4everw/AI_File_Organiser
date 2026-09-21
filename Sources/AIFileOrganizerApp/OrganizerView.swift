@@ -281,7 +281,12 @@ struct OrganizerView: View {
               ForEach(recognition.candidates.prefix(3), id: \.conceptID) { candidate in
                 if let concept = model.concepts.first(where: { $0.id == candidate.conceptID }) {
                   HStack {
-                    Text("可能是 \(concept.name)")
+                    Text(
+                      recognition.status == .confident
+                        && recognition.candidates.first?.conceptID == candidate.conceptID
+                        ? "高度相似：\(concept.name)"
+                        : "可能是 \(concept.name)"
+                    )
                     Spacer()
                     Button("确认") {
                       model.teachConcept(concept.id, itemIDs: [item.id], isPositive: true)

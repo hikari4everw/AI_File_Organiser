@@ -13,7 +13,7 @@ import Testing
       condition: RuleCondition(conceptID: concept.id), destinationID: destination)
     let confirmed = recognition(item: item, confirmed: [concept.id])
     let unresolved = ConceptRecognitionResult(
-      itemIdentity: item.snapshot.path, status: .needsReview,
+      itemIdentity: item.snapshot.path, status: .confident,
       confirmedConceptIDs: [], candidates: [ConceptCandidate(
         conceptID: concept.id, similarity: 0.9, supportingExampleIDs: [])])
 

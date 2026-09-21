@@ -23,7 +23,7 @@ import Testing
     #expect(result.confirmedConceptIDs == [manga.id, translated.id])
   }
 
-  private let version = "test-encoder-v1"
+  private let version = ConceptModelManager.modelVersion
 
   @Test func explicitLabelAndAncestorAreConfirmedWithoutDestination() {
     let parent = FileConcept(name: "课程资料")
@@ -41,7 +41,7 @@ import Testing
     #expect(result.confirmedConceptIDs == [parent.id, child.id])
   }
 
-  @Test func similarUnlabeledFileOffersReviewableCandidateOnly() {
+  @Test func similarUnlabeledFileOffersConfidentReviewableCandidate() {
     let manga = FileConcept(name: "漫画")
     let example = ConceptExample(
       conceptID: manga.id, itemIdentity: "example", isPositive: true,
@@ -53,10 +53,76 @@ import Testing
         modelVersion: version, itemKind: .directory, visualVector: [0.98, 0.02]),
       concepts: [manga], examples: [example])
 
-    #expect(result.status == .needsReview)
+    #expect(result.status == .confident)
     #expect(result.confirmedConceptIDs.isEmpty)
     #expect(result.candidates.map(\.conceptID) == [manga.id])
     #expect(result.candidates.first?.supportingExampleIDs == [example.id])
+  }
+
+  @Test func calibratedVisualMatchNeedsMarginBeforeBecomingConfident() {
+    let first = FileConcept(name: "漫画")
+    let second = FileConcept(name: "同人志")
+    let examples = [
+      ConceptExample(
+        conceptID: first.id, itemIdentity: "first", isPositive: true,
+        features: ConceptFeatureSnapshot(
+          modelVersion: version, itemKind: .directory, visualVector: [1, 0])),
+      ConceptExample(
+        conceptID: second.id, itemIdentity: "second", isPositive: true,
+        features: ConceptFeatureSnapshot(
+          modelVersion: version, itemKind: .directory, visualVector: [0.9999, 0.014])),
+    ]
+
+    let result = ConceptRecognizer().recognize(
+      itemIdentity: "new", features: ConceptFeatureSnapshot(
+        modelVersion: version, itemKind: .directory, visualVector: [1, 0]),
+      concepts: [first, second], examples: examples)
+
+    #expect(result.status == .needsReview)
+  }
+
+  @Test func textOnlySimilarityNeverUsesVisualConfidenceThreshold() {
+    let concept = FileConcept(name: "讲义")
+    let example = ConceptExample(
+      conceptID: concept.id, itemIdentity: "example", isPositive: true,
+      features: ConceptFeatureSnapshot(
+        modelVersion: "none", itemKind: .file, visualVector: [],
+        textModelVersion: "hashed-text-v1", textVector: [1, 0]))
+    let result = ConceptRecognizer().recognize(
+      itemIdentity: "new", features: ConceptFeatureSnapshot(
+        modelVersion: "none", itemKind: .file, visualVector: [],
+        textModelVersion: "hashed-text-v1", textVector: [1, 0]),
+      concepts: [concept], examples: [example])
+
+    #expect(result.status == .needsReview)
+  }
+
+  @Test func textNegativeCannotIncreaseVisualConfidenceMargin() {
+    let first = FileConcept(name: "漫画")
+    let second = FileConcept(name: "同人志")
+    let examples = [
+      ConceptExample(
+        conceptID: first.id, itemIdentity: "first", isPositive: true,
+        features: ConceptFeatureSnapshot(
+          modelVersion: version, itemKind: .directory, visualVector: [0.8, 0.6])),
+      ConceptExample(
+        conceptID: second.id, itemIdentity: "second-positive", isPositive: true,
+        features: ConceptFeatureSnapshot(
+          modelVersion: version, itemKind: .directory, visualVector: [0.79, 0.613],
+          textModelVersion: "hashed-text-v1", textVector: [0, 1])),
+      ConceptExample(
+        conceptID: second.id, itemIdentity: "second-negative", isPositive: false,
+        features: ConceptFeatureSnapshot(
+          modelVersion: version, itemKind: .directory, visualVector: [0, 1],
+          textModelVersion: "hashed-text-v1", textVector: [1, 0])),
+    ]
+    let result = ConceptRecognizer().recognize(
+      itemIdentity: "new", features: ConceptFeatureSnapshot(
+        modelVersion: version, itemKind: .directory, visualVector: [1, 0],
+        textModelVersion: "hashed-text-v1", textVector: [1, 0]),
+      concepts: [first, second], examples: examples)
+
+    #expect(result.status == .needsReview)
   }
 
   @Test func explicitNegativeExcludesConceptWithoutRejectingOtherLabels() {

@@ -27,12 +27,12 @@
 
 **Interfaces:** `ConceptFeatureExtractor.extract(item: ItemSnapshot) async throws -> ConceptFeatureSnapshot`; an injectable `ImageEmbeddingProvider` allows a deterministic test provider and the pinned Core ML implementation. Benchmark input is an explicit local manifest of whole-item paths and labels, not a copy of the corpus.
 
-- [ ] Inspect and record eligible whole-item counts and formats for R18 manga, ordinary manga, piano scores, and unknowns without displaying or modifying page content.
-- [ ] Write tests for bounded image selection, PDF page selection, cloud placeholders, unreadable content, cancellation, and model version tagging; verify the new tests fail for the missing capability.
-- [ ] Implement only the extractor and Core ML loading needed to encode the fixed corpus; run the focused tests to green.
-- [ ] Build teaching/calibration/holdout manifests with disjoint works and no path-derived label leakage. Freeze scoring thresholds on calibration; evaluate holdout without changing them.
-- [ ] Report overall and per-concept confident precision and coverage. Advance only when confident precision is at least 95% and coverage at least 50% on the agreed corpus; otherwise stop and review the failure before broadening implementation.
-- [ ] Run `swift test --filter ConceptFeatureTests` and `swift run AIFileOrganizerChecks` using writable build/module caches; commit the gate code and result summary, excluding the corpus and model weights.
+- [x] Inspect and record eligible whole-item counts and formats for R18 manga, ordinary manga, piano scores, and unknowns without displaying or modifying page content.
+- [x] Write tests for bounded image selection, PDF page selection, cloud placeholders, unreadable content, cancellation, and model version tagging; verify the new tests fail for the missing capability.
+- [x] Implement only the extractor and Core ML loading needed to encode the fixed corpus; run the focused tests to green.
+- [x] Build teaching/calibration/holdout manifests with disjoint works and no path-derived label leakage. Freeze scoring thresholds on calibration; evaluate holdout without changing them.
+- [x] Report overall and per-concept confident precision and coverage. Advance only when confident precision is at least 95% and coverage at least 50% on the agreed corpus; otherwise stop and review the failure before broadening implementation.
+- [x] Run `swift test --filter ConceptFeatureTests` and `swift run AIFileOrganizerChecks` using writable build/module caches; commit the gate code and result summary, excluding the corpus and model weights.
 
 ## Task 2: Global concept data and explicit examples
 
@@ -40,10 +40,10 @@
 
 **Interfaces:** `FileConcept` has stable ID, name, description, aliases and optional parent ID. `ConceptExample` has item identity, concept ID, positive/negative label, versioned feature snapshot and timestamp. `ConceptStore` provides create/update/delete concept, add/retract example, list concepts/examples.
 
-- [ ] Write failing database tests for restart persistence, cross-workspace visibility, cycle rejection, duplicate example replacement, retraction, and deletion that disables referencing rules.
-- [ ] Add a new GRDB migration and minimal transactional CRUD. Reject invalid parent IDs and cycles; keep old data and rules decodable.
-- [ ] Test missing source files: the saved snapshot still participates in retrieval. Never copy page bytes into the database.
-- [ ] Run `swift test --filter ConceptStoreTests` plus database regression tests; commit the data layer.
+- [x] Write failing database tests for restart persistence, cross-workspace visibility, cycle rejection, duplicate example replacement, retraction, and deletion that disables referencing rules.
+- [x] Add a new GRDB migration and minimal transactional CRUD. Reject invalid parent IDs and cycles; keep old data and rules decodable.
+- [x] Test missing source files: the saved snapshot still participates in retrieval. Never copy page bytes into the database.
+- [x] Run `swift test --filter ConceptStoreTests` plus database regression tests; commit the data layer.
 
 ## Task 3: Recognition and classification integration
 
@@ -51,11 +51,11 @@
 
 **Interfaces:** `ConceptRecognitionResult` contains item ID, matched concept IDs, candidate IDs with evidence, status (`confirmed`, `confident`, `review`, `unknown`), and feature version. The recognizer accepts an `ItemContext`/snapshot plus global concepts/examples and returns no destination path.
 
-- [ ] Write failing tests for positive and negative examples, multiple concepts, ancestor propagation, unknown items, model unavailability, and low-confidence abstention.
-- [ ] Implement calibrated retrieval and evidence without treating raw similarity as a probability. Invalidate recognition cache when examples or feature version change.
-- [ ] Run recognition before destination decisions, including the existing fast deterministic branch. Preserve independent legacy rules; do not use unresolved concept matches as certain conditions.
-- [ ] Add integration tests proving an identified concept without a workspace route remains in place, while existing nonconcept behavior still runs for unknowns.
-- [ ] Run `swift test --filter ClassificationTests` and new recognition tests; commit the pipeline.
+- [x] Write failing tests for positive and negative examples, multiple concepts, ancestor propagation, unknown items, model unavailability, and low-confidence abstention.
+- [x] Implement calibrated retrieval and evidence without treating raw similarity as a probability. Invalidate recognition cache when examples or feature version change.
+- [x] Run recognition before destination decisions, including the existing fast deterministic branch. Preserve independent legacy rules; do not use unresolved concept matches as certain conditions.
+- [x] Add integration tests proving an identified concept without a workspace route remains in place, while existing nonconcept behavior still runs for unknowns.
+- [x] Run `swift test --filter ClassificationTests` and new recognition tests; commit the pipeline.
 
 ## Task 4: Concept-aware organization and naming rules
 
@@ -63,10 +63,10 @@
 
 **Interfaces:** `RuleCondition.conceptID: UUID?` is optional and defaults to nil when old JSON is decoded. Both rule engines receive concept recognition results and the concept hierarchy; they must not re-read files or invent paths.
 
-- [ ] Write failing tests for a concept-only route, combined concept and literal constraints, child-over-parent priority, unrelated conflicts, a missing/deleted concept, and old rule decoding.
-- [ ] Add a deterministic known-concept resolver before language-model interpretation. Ambiguous aliases and unresolved destinations produce incomplete editable drafts, never executable rules.
-- [ ] Apply concept conditions to both organization and naming rules; preserve existing filename validation and independent move/rename selection.
-- [ ] Run `swift test --filter RuleTests`, `RuleCreationTests`, and `NamingOperationTests`; commit the rule integration.
+- [x] Write failing tests for a concept-only route, combined concept and literal constraints, child-over-parent priority, unrelated conflicts, a missing/deleted concept, and old rule decoding.
+- [x] Add a deterministic known-concept resolver before language-model interpretation. Ambiguous aliases and unresolved destinations produce incomplete editable drafts, never executable rules.
+- [x] Apply concept conditions to both organization and naming rules; preserve existing filename validation and independent move/rename selection.
+- [x] Run `swift test --filter RuleTests`, `RuleCreationTests`, and `NamingOperationTests`; commit the rule integration.
 
 ## Task 5: Teaching, correction, and review UI
 
@@ -74,20 +74,20 @@
 
 **Interfaces:** The UI may select current items or explicitly selected external files. AppModel operations create/edit/delete concepts, teach positive/negative examples, confirm/correct a proposed concept, and refresh unexecuted proposals. Only existing plan/executor APIs move or rename files.
 
-- [ ] Write tests for teaching without a destination, correction without movement, external file selection, recognition display, and changed concepts invalidating a prepared plan.
-- [ ] Add concept management and batch teaching with optional parent and destination; the optional destination creates a workspace rule.
-- [ ] Show concept and destination separately in the inspector; provide confirm, reject, and replace label actions. Do not treat execution confirmation as concept confirmation.
-- [ ] Extend rule drafts to select a concept and target from approved IDs, displaying ambiguity before save.
-- [ ] Run unit and UI tests; commit the UI and AppModel integration.
+- [x] Write tests for teaching without a destination, correction without movement, external file selection, recognition display, and changed concepts invalidating a prepared plan.
+- [x] Add concept management and batch teaching with optional parent and destination; the optional destination creates a workspace rule.
+- [x] Show concept and destination separately in the inspector; provide confirm, reject, and replace label actions. Do not treat execution confirmation as concept confirmation.
+- [x] Extend rule drafts to select a concept and target from approved IDs, displaying ambiguity before save.
+- [x] Run unit and UI tests; commit the UI and AppModel integration.
 
 ## Task 6: Safety, compatibility, and final verification
 
 **Files:** Update `README.md`, `docs/ARCHITECTURE.md`, `docs/PRIVACY.md` and the focused regression tests only where behavior changes.
 
-- [ ] Test symlinks, packages, unreadable and deleted examples, model corruption, feature-version mismatch, conflicting rules, cancellation, and multi-workspace isolation of routes.
-- [ ] Run `swift test`, `swift run AIFileOrganizerChecks`, and the Xcode test scheme with writable caches; inspect the complete results and diff.
-- [ ] Verify the real holdout again without changing its split or thresholds. Record precision, coverage, per-class confusion, and unsupported formats accurately.
-- [ ] Update user docs with model download, privacy, concept deletion, and low-confidence review behavior. Commit only code, tests, docs, and benchmark aggregate results; never commit corpus paths, content, or model weights.
+- [x] Test symlinks, packages, unreadable and deleted examples, model corruption, feature-version mismatch, conflicting rules, cancellation, and multi-workspace isolation of routes.
+- [x] Run `swift test`, `swift run AIFileOrganizerChecks`, and the Xcode test scheme with writable caches; inspect the complete results and diff.
+- [x] Verify the real holdout again without changing its split or thresholds. Record precision, coverage, per-class confusion, and unsupported formats accurately.
+- [x] Update user docs with model download, privacy, concept deletion, and low-confidence review behavior. Commit only code, tests, docs, and benchmark aggregate results; never commit corpus paths, content, or model weights.
 
 ## Execution notes
 
@@ -122,3 +122,11 @@
 - The Xcode project now gives the App and SwiftPM the same module name and uses the correct test host. UI tests use a temporary database and do not write test concepts into the user's application database.
 - Final verification passed 175 Swift unit tests in 22 suites, 11 core safety checks, and the Xcode scheme with the same 175 unit tests plus 6 UI tests.
 - Tasks 1 and 6 remain incomplete only at the independent corpus gate. No untouched, disjoint set currently covers ordinary manga, distinct artbooks, piano scores, and unknowns after the examined pilots. Automatic similarity confidence therefore remains disabled; candidates continue to require explicit review.
+
+## Final corpus acceptance (2026-09-21)
+
+- The user authorized read-only validation from the organized manga, `bunga` doujin, piano-score, and unrelated organized-file trees. Paths, manifests, model files, and file content were kept outside the repository.
+- A 15-item teaching split used five whole items per known concept. The final holdout was frozen after calibration and contained 20 doujin, 20 ordinary-manga, 20 piano-score, and 20 unknown items. Piano scores included PDF and JPG/PNG work folders; one unknown item was unreadable, and all 60 known items were supported.
+- Calibration fixed the MobileCLIP-BLT visual threshold at `0.75` with a `0.02` first-to-second margin. The independent holdout produced 32 correct confident predictions out of 33: **96.97% confident precision** and **55.0% known-item coverage**. Per class: doujin 5/5 confident correct (25% coverage), ordinary manga 8/8 (40%), piano score 19/20 (100%); 19 readable unknowns produced zero confident false positives.
+- The 95% precision / 50% coverage gate passed. Product recognition now exposes a calibrated `confident` status only for the pinned visual model. It remains reviewable and does not automatically confirm a concept, fire a concept rule, choose a path, or bypass plan confirmation and preflight. Text similarity remains review-only.
+- All six tasks are complete. Final verification passed 178 Swift tests in 22 suites, 11 core checks, the Xcode unit suite with the same 178 tests, and 6 UI tests.
