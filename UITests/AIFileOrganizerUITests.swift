@@ -79,5 +79,25 @@
       XCTAssertFalse(app.descendants(matching: .any)["rename-preview"].exists)
       XCTAssertFalse(app.descendants(matching: .any)["rename-row-preview"].exists)
     }
+
+    @MainActor
+    func testConfirmedConceptCanBeReplacedFromInspector() {
+      let app = XCUIApplication()
+      app.launchArguments = [
+        "-ui-testing-reset", "-ui-testing-workspace-demo", "-ui-testing-concept-demo",
+        "-ApplePersistenceIgnoreState", "YES",
+      ]
+      app.launch()
+
+      XCTAssertTrue(app.staticTexts["Moonlight Score.pdf"].waitForExistence(timeout: 5))
+      app.staticTexts["Moonlight Score.pdf"].firstMatch.click()
+      let replacementMenu = app.descendants(matching: .any)["改为…"]
+      XCTAssertTrue(replacementMenu.waitForExistence(timeout: 5))
+      replacementMenu.click()
+      XCTAssertTrue(app.menuItems["课程讲义"].waitForExistence(timeout: 2))
+      app.menuItems["课程讲义"].click()
+      XCTAssertTrue(app.staticTexts["已替换文件概念；整理目标仍需按规则审核"]
+        .waitForExistence(timeout: 5))
+    }
   }
 #endif

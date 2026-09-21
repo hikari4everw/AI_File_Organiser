@@ -101,6 +101,9 @@ final class AppModel: ObservableObject {
           database: database,
           renameDisposition: renameDisposition)
       }
+      if ProcessInfo.processInfo.arguments.contains("-ui-testing-concept-demo") {
+        seedConceptDemo(database: database)
+      }
       if isUITesting {
         modelStatus = "本地 AI 状态将在整理时检查"
       } else {
@@ -172,6 +175,29 @@ final class AppModel: ObservableObject {
     selectedItemID = item.id
     statusMessage = "方案已生成，请确认移动位置"
     modelStatus = "Apple 本地模型可用"
+  }
+
+  private func seedConceptDemo(database: AppDatabase) {
+    guard let item = items.first else { return }
+    do {
+      let store = ConceptStore(database: database)
+      var known = try store.concepts()
+      func concept(named name: String) throws -> FileConcept {
+        if let existing = known.first(where: { $0.name == name }) { return existing }
+        let created = FileConcept(name: name)
+        try store.save(created)
+        known.append(created)
+        return created
+      }
+      let score = try concept(named: "钢琴谱")
+      _ = try concept(named: "课程讲义")
+      concepts = try store.concepts()
+      recognitionByItem[item.id] = ConceptRecognitionResult(
+        itemIdentity: ConceptIdentity.of(item), status: .confirmed,
+        confirmedConceptIDs: [score.id], candidates: [])
+    } catch {
+      lastError = error.localizedDescription
+    }
   }
 
   var readyProposals: [ClassificationProposal] {
