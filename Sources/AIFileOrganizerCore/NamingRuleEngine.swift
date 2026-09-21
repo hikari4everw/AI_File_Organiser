@@ -9,14 +9,16 @@ public struct NamingRuleEngine: Sendable {
     rules: [NamingRule],
     semanticEvaluationsByItem: [UUID: [UUID: SemanticNamingConditionEvaluation]] = [:],
     recognitionByItem: [UUID: ConceptRecognitionResult] = [:],
-    concepts: [FileConcept] = []
+    concepts: [FileConcept]? = nil
   ) -> [RenameProposal] {
-    contexts.compactMap { context -> RenameProposal? in
+    let knownConceptIDs = concepts.map { Set($0.map(\.id)) }
+    return contexts.compactMap { context -> RenameProposal? in
       guard context.snapshot.kind != .applicationBundle else { return nil }
       let candidates = rules.filter {
         $0.isEnabled && !$0.operations.isEmpty
           && conditionMatches(
-            $0.condition, context: context, recognition: recognitionByItem[context.id])
+            $0.condition, context: context, recognition: recognitionByItem[context.id],
+            knownConceptIDs: knownConceptIDs)
       }
       var matches: [NamingRule] = []
       var unresolved: [(rule: NamingRule, reason: String)] = []
@@ -42,7 +44,7 @@ public struct NamingRuleEngine: Sendable {
           ruleID: unresolved.count == 1 ? first.rule.id : nil,
           reason: "命名规则语义判断不确定：\(first.reason)")
       }
-      let parentByID = Dictionary(uniqueKeysWithValues: concepts.map { ($0.id, $0.parentID) })
+      let parentByID = Dictionary(uniqueKeysWithValues: (concepts ?? []).map { ($0.id, $0.parentID) })
       let matchedIDs = Set(matches.compactMap(\.condition.conceptID))
       matches.removeAll { rule in
         guard let conceptID = rule.condition.conceptID else { return false }
@@ -106,12 +108,16 @@ public struct NamingRuleEngine: Sendable {
 
   public func semanticCandidateRules(
     context: ItemContext, rules: [NamingRule],
-    recognition: ConceptRecognitionResult? = nil
+    recognition: ConceptRecognitionResult? = nil,
+    concepts: [FileConcept]? = nil
   ) -> [NamingRule] {
+    let knownConceptIDs = concepts.map { Set($0.map(\.id)) }
     guard context.snapshot.kind != .applicationBundle else { return [] }
     return rules.filter {
       $0.isEnabled && !$0.operations.isEmpty && $0.condition.semanticDescription != nil
-        && conditionMatches($0.condition, context: context, recognition: recognition)
+        && conditionMatches(
+          $0.condition, context: context, recognition: recognition,
+          knownConceptIDs: knownConceptIDs)
     }
   }
 
@@ -145,12 +151,11 @@ public struct NamingRuleEngine: Sendable {
 
   private func conditionMatches(
     _ condition: RuleCondition, context: ItemContext,
-    recognition: ConceptRecognitionResult?
+    recognition: ConceptRecognitionResult?, knownConceptIDs: Set<UUID>?
   ) -> Bool {
-    if let conceptID = condition.conceptID,
-      recognition?.confirmedConceptIDs.contains(conceptID) != true
-    {
-      return false
+    if let conceptID = condition.conceptID {
+      if knownConceptIDs.map({ !$0.contains(conceptID) }) == true { return false }
+      if recognition?.confirmedConceptIDs.contains(conceptID) != true { return false }
     }
     if !condition.itemKinds.isEmpty, !condition.itemKinds.contains(context.snapshot.kind) {
       return false

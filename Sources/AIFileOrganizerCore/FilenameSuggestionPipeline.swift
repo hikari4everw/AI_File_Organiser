@@ -70,7 +70,7 @@ public struct FilenameSuggestionPipeline: Sendable {
     for context in candidateContexts {
       for rule in ruleEngine.semanticCandidateRules(
         context: context, rules: namingRules,
-        recognition: recognitionByItem[context.id])
+        recognition: recognitionByItem[context.id], concepts: concepts)
       {
         let evaluation: SemanticNamingConditionEvaluation
         if semanticEvaluator.isAvailable {

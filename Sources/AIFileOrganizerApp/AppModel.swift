@@ -1097,6 +1097,60 @@ final class AppModel: ObservableObject {
     }
   }
 
+  func replaceConceptLabel(
+    from oldConceptID: UUID, to newConceptID: UUID, itemID: UUID
+  ) {
+    guard let database, !isTeachingConcept, oldConceptID != newConceptID,
+      concepts.contains(where: { $0.id == oldConceptID }),
+      concepts.contains(where: { $0.id == newConceptID }),
+      let item = items.first(where: { $0.id == itemID })
+    else { return }
+    isTeachingConcept = true
+    Task { [weak self] in
+      guard let self else { return }
+      defer { self.isTeachingConcept = false }
+      do {
+        let (feature, modelFailed) = await Task.detached(priority: .utility) {
+          let manager = ConceptModelManager()
+          let provider = try? manager.provider()
+          var feature = await ConceptTextFeatureExtractor().extract(item: item)
+          if let provider,
+            let visual = try? await ConceptFeatureExtractor(provider: provider).extract(item: item)
+          {
+            feature.modelVersion = visual.modelVersion
+            feature.visualVector = visual.visualVector
+          }
+          return (feature, manager.isInstalled && provider == nil)
+        }.value
+        if modelFailed { self.conceptModelStatus = "图像概念模型损坏，请重新下载" }
+        let store = ConceptStore(database: database)
+        try store.replaceLabel(
+          itemIdentity: ConceptIdentity.of(item), features: feature,
+          from: oldConceptID, to: newConceptID)
+        let concepts = self.concepts
+        let examples = try concepts.flatMap { try store.examples(conceptID: $0.id) }
+        let currentItems = self.items
+        self.recognitionByItem = await Task.detached(priority: .utility) {
+          let provider = try? ConceptModelManager().provider()
+          return await ConceptRecognitionService().recognize(
+            items: currentItems, concepts: concepts, examples: examples, provider: provider)
+        }.value
+        self.currentPlan = nil
+        self.refreshConceptProposals(for: [itemID])
+        let changedConceptIDs: Set<UUID> = [oldConceptID, newConceptID]
+        let namingRuleIDs = Set(self.namingRules.filter {
+          $0.condition.conceptID.map(changedConceptIDs.contains) == true
+        }.map(\.id))
+        let invalidated = ConceptProposalInvalidator().invalidate(
+          proposals: self.proposals, renames: self.renameProposals,
+          moveRuleIDs: [], namingRuleIDs: namingRuleIDs, itemIDs: [itemID])
+        self.renameProposals = invalidated.renames
+        try database.saveRenameProposals(self.renameProposals)
+        self.statusMessage = "已替换文件概念；整理目标仍需按规则审核"
+      } catch { self.lastError = error.localizedDescription }
+    }
+  }
+
   private func conceptSnapshot(for url: URL) -> ItemSnapshot? {
     guard let values = try? url.resourceValues(forKeys: [
       .isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey, .isPackageKey,

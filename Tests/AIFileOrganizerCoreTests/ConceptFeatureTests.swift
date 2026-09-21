@@ -118,4 +118,45 @@ private struct ConstantImageEmbedder: ImageEmbeddingProvider {
     cloud.isCloudPlaceholder = true
     #expect(try await extractor.extract(item: cloud) == nil)
   }
+
+  @Test func unsupportedAndApplicationBundleContentIsIgnored() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let unreadable = directory.appendingPathComponent("broken.png")
+    try Data("not an image".utf8).write(to: unreadable)
+    let extractor = ConceptFeatureExtractor(provider: ConstantImageEmbedder())
+    let brokenItem = ItemSnapshot(
+      sessionID: UUID(), path: unreadable.path, name: unreadable.lastPathComponent,
+      kind: .file, fileExtension: "png")
+    let appItem = ItemSnapshot(
+      sessionID: UUID(), path: directory.path, name: "Example.app",
+      kind: .applicationBundle)
+
+    #expect(try await extractor.extract(item: brokenItem) == nil)
+    #expect(try await extractor.extract(item: appItem) == nil)
+  }
+
+  @Test func cancelledExtractionStopsBeforeEmbedding() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let imageURL = directory.appendingPathComponent("page.png")
+    let bitmap = NSBitmapImageRep(
+      bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16,
+      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+      isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    try #require(bitmap.representation(using: .png, properties: [:])).write(to: imageURL)
+    let item = ItemSnapshot(
+      sessionID: UUID(), path: imageURL.path, name: imageURL.lastPathComponent,
+      kind: .file, fileExtension: "png")
+    let task = Task {
+      try await ConceptFeatureExtractor(provider: ConstantImageEmbedder()).extract(item: item)
+    }
+    task.cancel()
+
+    await #expect(throws: CancellationError.self) { try await task.value }
+  }
 }

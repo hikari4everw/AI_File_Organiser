@@ -10,12 +10,15 @@ public struct RuleEngine: Sendable {
 
   public func evaluate(
     item: ItemContext, rules: [OrganizationRule],
-    recognition: ConceptRecognitionResult? = nil, concepts: [FileConcept] = []
+    recognition: ConceptRecognitionResult? = nil, concepts: [FileConcept]? = nil
   ) -> RuleEvaluation {
+    let knownConceptIDs = concepts.map { Set($0.map(\.id)) }
     var matches: [(ruleID: UUID, target: MatchTarget, conceptID: UUID?)] = []
     var semantic: [UUID] = []
     for rule in rules where rule.isEnabled {
-      guard deterministicPartMatches(rule.condition, item: item, recognition: recognition) else {
+      guard deterministicPartMatches(
+        rule.condition, item: item, recognition: recognition,
+        knownConceptIDs: knownConceptIDs) else {
         continue
       }
       if rule.condition.semanticDescription != nil {
@@ -31,7 +34,7 @@ public struct RuleEngine: Sendable {
         }
       }
     }
-    let parentByID = Dictionary(uniqueKeysWithValues: concepts.map { ($0.id, $0.parentID) })
+    let parentByID = Dictionary(uniqueKeysWithValues: (concepts ?? []).map { ($0.id, $0.parentID) })
     let matchedConceptIDs = Set(matches.compactMap(\.conceptID))
     matches.removeAll { match in
       guard let conceptID = match.conceptID else { return false }
@@ -55,12 +58,11 @@ public struct RuleEngine: Sendable {
 
   private func deterministicPartMatches(
     _ condition: RuleCondition, item: ItemContext,
-    recognition: ConceptRecognitionResult?
+    recognition: ConceptRecognitionResult?, knownConceptIDs: Set<UUID>?
   ) -> Bool {
-    if let conceptID = condition.conceptID,
-      recognition?.confirmedConceptIDs.contains(conceptID) != true
-    {
-      return false
+    if let conceptID = condition.conceptID {
+      if knownConceptIDs.map({ !$0.contains(conceptID) }) == true { return false }
+      if recognition?.confirmedConceptIDs.contains(conceptID) != true { return false }
     }
     if !condition.itemKinds.isEmpty, !condition.itemKinds.contains(item.snapshot.kind) { return false }
     if !condition.fileExtensions.isEmpty,

@@ -4,6 +4,25 @@ import Testing
 @testable import AIFileOrganizerCore
 
 @Suite struct ConceptRecognizerTests {
+  @Test func oneItemCanConfirmMultipleIndependentConcepts() {
+    let manga = FileConcept(name: "漫画")
+    let translated = FileConcept(name: "中文译本")
+    let features = ConceptFeatureSnapshot(
+      modelVersion: "manual-only-v1", itemKind: .file, visualVector: [])
+    let examples = [manga, translated].map {
+      ConceptExample(
+        conceptID: $0.id, itemIdentity: "resource:one",
+        isPositive: true, features: features)
+    }
+
+    let result = ConceptRecognizer().recognize(
+      itemIdentity: "resource:one", features: features,
+      concepts: [manga, translated], examples: examples)
+
+    #expect(result.status == .confirmed)
+    #expect(result.confirmedConceptIDs == [manga.id, translated.id])
+  }
+
   private let version = "test-encoder-v1"
 
   @Test func explicitLabelAndAncestorAreConfirmedWithoutDestination() {

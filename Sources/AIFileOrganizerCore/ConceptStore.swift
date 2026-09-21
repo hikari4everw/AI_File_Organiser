@@ -55,5 +55,22 @@ public struct ConceptStore: Sendable {
 
   public func retract(_ exampleID: UUID) throws { try database.deleteConceptExample(exampleID) }
 
+  public func replaceLabel(
+    itemIdentity: String, features: ConceptFeatureSnapshot,
+    from oldConceptID: UUID, to newConceptID: UUID
+  ) throws {
+    guard oldConceptID != newConceptID else { return }
+    let knownConceptIDs = Set(try concepts().map(\.id))
+    guard knownConceptIDs.contains(oldConceptID), knownConceptIDs.contains(newConceptID) else {
+      throw OrganizerError.persistenceFailed("概念不存在")
+    }
+    try teach(ConceptExample(
+      conceptID: oldConceptID, itemIdentity: itemIdentity,
+      isPositive: false, features: features))
+    try teach(ConceptExample(
+      conceptID: newConceptID, itemIdentity: itemIdentity,
+      isPositive: true, features: features))
+  }
+
   public func delete(_ conceptID: UUID) throws { try database.deleteConcept(conceptID) }
 }

@@ -91,6 +91,64 @@ import Testing
     #expect(evidence.first?.features == feature)
   }
 
+  @Test func replacingLabelRejectsOldConceptAndConfirmsNewConcept() throws {
+    let store = ConceptStore(database: try AppDatabase.inMemory())
+    let oldConcept = FileConcept(name: "课程讲义")
+    let newConcept = FileConcept(name: "课程作业")
+    try store.save(oldConcept)
+    try store.save(newConcept)
+    let feature = ConceptFeatureSnapshot(
+      modelVersion: "manual-only-v1", itemKind: .file, visualVector: [])
+    try store.teach(ConceptExample(
+      conceptID: oldConcept.id, itemIdentity: "resource:one",
+      isPositive: true, features: feature))
+
+    try store.replaceLabel(
+      itemIdentity: "resource:one", features: feature,
+      from: oldConcept.id, to: newConcept.id)
+
+    #expect(try store.examples(conceptID: oldConcept.id).first?.isPositive == false)
+    #expect(try store.examples(conceptID: newConcept.id).first?.isPositive == true)
+    let allExamples = try [oldConcept, newConcept].flatMap {
+      try store.examples(conceptID: $0.id)
+    }
+    let result = ConceptRecognizer().recognize(
+      itemIdentity: "resource:one", features: feature,
+      concepts: [oldConcept, newConcept], examples: allExamples)
+    #expect(result.confirmedConceptIDs == [newConcept.id])
+  }
+
+  @Test func retractingExampleRemovesSavedEvidence() throws {
+    let store = ConceptStore(database: try AppDatabase.inMemory())
+    let concept = FileConcept(name: "银行账单")
+    try store.save(concept)
+    let example = ConceptExample(
+      conceptID: concept.id, itemIdentity: "resource:one", isPositive: true,
+      features: ConceptFeatureSnapshot(
+        modelVersion: "manual-only-v1", itemKind: .file, visualVector: []))
+    try store.teach(example)
+
+    try store.retract(example.id)
+
+    #expect(try store.examples(conceptID: concept.id).isEmpty)
+  }
+
+  @Test func conceptsAreGlobalWhileRoutesRemainWorkspaceScoped() throws {
+    let database = try AppDatabase.inMemory()
+    let store = ConceptStore(database: database)
+    let concept = FileConcept(name: "论文")
+    try store.save(concept)
+    let firstWorkspaceID = UUID()
+    let secondWorkspaceID = UUID()
+    try database.saveRule(OrganizationRule(
+      workspaceID: firstWorkspaceID, originalText: "论文放 Research",
+      condition: RuleCondition(conceptID: concept.id), destinationID: UUID()))
+
+    #expect(try store.concepts() == [concept])
+    #expect(try database.rules(workspaceID: firstWorkspaceID).count == 1)
+    #expect(try database.rules(workspaceID: secondWorkspaceID).isEmpty)
+  }
+
   @Test func conceptParentCannotFormCycle() throws {
     let store = ConceptStore(database: try AppDatabase.inMemory())
     let parent = FileConcept(name: "课程资料")

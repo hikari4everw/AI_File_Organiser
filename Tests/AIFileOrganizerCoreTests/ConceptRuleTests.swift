@@ -57,6 +57,47 @@ import Testing
       concepts: [manga, translated]) == .conflict(ruleIDs: rules.map(\.id)))
   }
 
+  @Test func deletedConceptCannotMatchStaleRecognition() {
+    let deletedID = UUID()
+    let item = context(name: "lecture.pdf")
+    let move = OrganizationRule(
+      workspaceID: UUID(), originalText: "已删除概念规则",
+      condition: RuleCondition(conceptID: deletedID), destinationID: UUID())
+    let naming = NamingRule(
+      workspaceID: UUID(), originalText: "已删除概念命名规则",
+      condition: RuleCondition(conceptID: deletedID),
+      operations: [.removeLiteralPrefix("lecture-")])
+    let stale = recognition(item: item, confirmed: [deletedID])
+
+    #expect(RuleEngine().evaluate(
+      item: item, rules: [move], recognition: stale, concepts: []) == .none)
+    #expect(NamingRuleEngine().proposals(
+      sessionID: item.snapshot.sessionID, contexts: [item], rules: [naming],
+      recognitionByItem: [item.id: stale], concepts: []).isEmpty)
+  }
+
+  @Test func conceptAndLiteralConditionsMustBothMatch() {
+    let concept = FileConcept(name: "课程讲义")
+    let destinationID = UUID()
+    let rule = OrganizationRule(
+      workspaceID: UUID(), originalText: "PDF 课程讲义放到 Study",
+      condition: RuleCondition(
+        fileExtensions: ["pdf"], filenameKeywords: ["lecture"],
+        conceptID: concept.id),
+      destinationID: destinationID)
+    let matching = context(name: "lecture.pdf")
+    let wrongName = context(name: "notes.pdf")
+    let confirmed = recognition(item: matching, confirmed: [concept.id])
+
+    #expect(RuleEngine().evaluate(
+      item: matching, rules: [rule], recognition: confirmed, concepts: [concept])
+      == .matchedMove(ruleID: rule.id, destinationID: destinationID))
+    #expect(RuleEngine().evaluate(
+      item: wrongName, rules: [rule],
+      recognition: recognition(item: wrongName, confirmed: [concept.id]),
+      concepts: [concept]) == .none)
+  }
+
   @Test func namingRuleCanUseConfirmedConceptWithoutSemanticGuess() throws {
     let concept = FileConcept(name: "R18 同人志")
     let item = context(name: "nhentai-42 - Example.pdf")

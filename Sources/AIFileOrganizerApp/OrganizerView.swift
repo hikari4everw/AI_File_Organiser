@@ -263,9 +263,19 @@ struct OrganizerView: View {
                 HStack {
                   Label(concept.name, systemImage: "checkmark.seal")
                   Spacer()
+                  Menu("改为…") {
+                    ForEach(model.concepts.filter { $0.id != concept.id }) { replacement in
+                      Button(replacement.name) {
+                        model.replaceConceptLabel(
+                          from: concept.id, to: replacement.id, itemID: item.id)
+                      }
+                    }
+                  }
+                  .disabled(model.concepts.count < 2 || model.isTeachingConcept)
                   Button("纠正") {
                     model.teachConcept(concept.id, itemIDs: [item.id], isPositive: false)
                   }
+                  .disabled(model.isTeachingConcept)
                 }
               }
               ForEach(recognition.candidates.prefix(3), id: \.conceptID) { candidate in
