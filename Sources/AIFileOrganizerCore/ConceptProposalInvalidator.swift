@@ -3,6 +3,18 @@ import Foundation
 public struct ConceptProposalInvalidator: Sendable {
   public init() {}
 
+  public func changedConfirmedConceptIDs(
+    before: [UUID: ConceptRecognitionResult],
+    after: [UUID: ConceptRecognitionResult],
+    itemIDs: Set<UUID>
+  ) -> Set<UUID> {
+    itemIDs.reduce(into: Set<UUID>()) { changed, itemID in
+      let oldIDs = before[itemID]?.confirmedConceptIDs ?? []
+      let newIDs = after[itemID]?.confirmedConceptIDs ?? []
+      changed.formUnion(oldIDs.symmetricDifference(newIDs))
+    }
+  }
+
   public func invalidate(
     proposals: [ClassificationProposal], renames: [RenameProposal],
     moveRuleIDs: Set<UUID>, namingRuleIDs: Set<UUID>,

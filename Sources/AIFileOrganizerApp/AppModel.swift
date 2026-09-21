@@ -47,7 +47,16 @@ final class AppModel: ObservableObject {
   init() {
     let isUITesting = ProcessInfo.processInfo.arguments.contains("-ui-testing-reset")
     do {
-      let database = try AppDatabase.applicationDatabase()
+      let database: AppDatabase
+      if isUITesting {
+        let url = Self.uiTestingDatabaseURL
+        for suffix in ["", "-wal", "-shm"] {
+          try? FileManager.default.removeItem(atPath: url.path + suffix)
+        }
+        database = try AppDatabase(path: url.path)
+      } else {
+        database = try AppDatabase.applicationDatabase()
+      }
       self.database = database
       concepts = try database.concepts()
       conceptModelStatus = ConceptModelManager().isInstalled
@@ -112,6 +121,11 @@ final class AppModel: ObservableObject {
     } catch {
       lastError = "数据库初始化失败：\(error.localizedDescription)"
     }
+  }
+
+  static var uiTestingDatabaseURL: URL {
+    FileManager.default.temporaryDirectory
+      .appendingPathComponent("AIFileOrganizerUITests-\(ProcessInfo.processInfo.processIdentifier).sqlite")
   }
 
   private func refreshModelStatus() {
@@ -227,7 +241,7 @@ final class AppModel: ObservableObject {
   }
 
   var canExecute: Bool {
-    !isWorking && receipt == nil && workspace != nil
+    !isWorking && !isTeachingConcept && receipt == nil && workspace != nil
       && (!readyProposals.isEmpty || folderProposals.contains { $0.status == .approved }
         || !selectedRenameProposals.isEmpty)
   }
@@ -268,7 +282,7 @@ final class AppModel: ObservableObject {
   }
 
   func startOrganizing() {
-    guard let workspace, let database, !isWorking else { return }
+    guard let workspace, let database, !isWorking, !isTeachingConcept else { return }
     resetSession()
     isWorking = true
     let session = OrganizationSession(workspaceID: workspace.id, state: .scanning)
@@ -595,7 +609,9 @@ final class AppModel: ObservableObject {
   }
 
   func prepareExecution() async -> Bool {
-    guard let workspace, let session, let database, !isWorking else { return false }
+    guard let workspace, let session, let database, !isWorking, !isTeachingConcept else {
+      return false
+    }
     currentPlan = nil
     do {
       isWorking = true
@@ -671,7 +687,8 @@ final class AppModel: ObservableObject {
   }
 
   func executePreparedPlan() {
-    guard let workspace, let database, var plan = currentPlan, !isWorking else { return }
+    guard let workspace, let database, var plan = currentPlan, !isWorking,
+      !isTeachingConcept else { return }
     plan.confirmedAt = Date()
     currentPlan = plan
     isWorking = true
@@ -952,7 +969,7 @@ final class AppModel: ObservableObject {
     name: String, description: String, aliases: [String], parentID: UUID?,
     defaultDestinationID: UUID?, itemIDs: Set<UUID>, externalURLs: [URL]
   ) -> Bool {
-    guard let database else { return false }
+    guard let database, !isWorking, !isTeachingConcept else { return false }
     if let destinationID = defaultDestinationID {
       guard workspace != nil,
         destinations.contains(where: { $0.id == destinationID && $0.kind == .category })
@@ -991,7 +1008,7 @@ final class AppModel: ObservableObject {
   }
 
   func deleteConcept(_ conceptID: UUID) {
-    guard let database else { return }
+    guard let database, !isWorking, !isTeachingConcept else { return }
     do {
       let moveRuleIDs = Set(rules.filter {
         $0.condition.conceptID == conceptID
@@ -1022,7 +1039,8 @@ final class AppModel: ObservableObject {
     _ conceptID: UUID, name: String, description: String,
     aliases: [String], parentID: UUID?
   ) -> Bool {
-    guard let database, var concept = concepts.first(where: { $0.id == conceptID })
+    guard let database, !isWorking, !isTeachingConcept,
+      var concept = concepts.first(where: { $0.id == conceptID })
     else { return false }
     concept.name = name
     concept.description = description
@@ -1054,8 +1072,10 @@ final class AppModel: ObservableObject {
     _ conceptID: UUID, itemIDs: Set<UUID>, externalURLs: [URL] = [],
     isPositive: Bool
   ) {
-    guard let database, !isTeachingConcept,
+    guard let database, !isWorking, !isTeachingConcept,
       concepts.contains(where: { $0.id == conceptID }) else { return }
+    let recognitionBefore = recognitionByItem
+    if receipt == nil { currentPlan = nil }
     isTeachingConcept = true
     let selected = items.filter { itemIDs.contains($0.id) }
     let access = externalURLs.filter { $0.startAccessingSecurityScopedResource() }
@@ -1106,11 +1126,13 @@ final class AppModel: ObservableObject {
             items: currentItems, concepts: concepts, examples: examples, provider: provider)
         }.value
         self.recognitionByItem = recognitions
-        self.currentPlan = nil
+        if self.receipt == nil { self.currentPlan = nil }
         self.refreshConceptProposals(for: itemIDs)
         if !itemIDs.isEmpty {
+          let changedConceptIDs = ConceptProposalInvalidator().changedConfirmedConceptIDs(
+            before: recognitionBefore, after: recognitions, itemIDs: itemIDs)
           let namingRuleIDs = Set(self.namingRules.filter {
-            $0.condition.conceptID == conceptID
+            $0.condition.conceptID.map(changedConceptIDs.contains) == true
           }.map(\.id))
           let invalidated = ConceptProposalInvalidator().invalidate(
             proposals: self.proposals, renames: self.renameProposals,
@@ -1126,11 +1148,13 @@ final class AppModel: ObservableObject {
   func replaceConceptLabel(
     from oldConceptID: UUID, to newConceptID: UUID, itemID: UUID
   ) {
-    guard let database, !isTeachingConcept, oldConceptID != newConceptID,
+    guard let database, !isWorking, !isTeachingConcept, oldConceptID != newConceptID,
       concepts.contains(where: { $0.id == oldConceptID }),
       concepts.contains(where: { $0.id == newConceptID }),
       let item = items.first(where: { $0.id == itemID })
     else { return }
+    let recognitionBefore = recognitionByItem
+    if receipt == nil { currentPlan = nil }
     isTeachingConcept = true
     Task { [weak self] in
       guard let self else { return }
@@ -1156,14 +1180,16 @@ final class AppModel: ObservableObject {
         let concepts = self.concepts
         let examples = try concepts.flatMap { try store.examples(conceptID: $0.id) }
         let currentItems = self.items
-        self.recognitionByItem = await Task.detached(priority: .utility) {
+        let recognitions = await Task.detached(priority: .utility) {
           let provider = try? ConceptModelManager().provider()
           return await ConceptRecognitionService().recognize(
             items: currentItems, concepts: concepts, examples: examples, provider: provider)
         }.value
-        self.currentPlan = nil
+        self.recognitionByItem = recognitions
+        if self.receipt == nil { self.currentPlan = nil }
         self.refreshConceptProposals(for: [itemID])
-        let changedConceptIDs: Set<UUID> = [oldConceptID, newConceptID]
+        let changedConceptIDs = ConceptProposalInvalidator().changedConfirmedConceptIDs(
+          before: recognitionBefore, after: recognitions, itemIDs: [itemID])
         let namingRuleIDs = Set(self.namingRules.filter {
           $0.condition.conceptID.map(changedConceptIDs.contains) == true
         }.map(\.id))

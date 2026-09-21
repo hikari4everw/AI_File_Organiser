@@ -63,4 +63,21 @@ import Testing
     #expect(result.proposals.first?.destinationID == nil)
     #expect(result.renames.first?.selectedBaseName == nil)
   }
+
+  @Test func changingChildLabelAlsoInvalidatesFormerAncestorRules() {
+    let itemID = UUID()
+    let parentID = UUID()
+    let childID = UUID()
+    let replacementID = UUID()
+    let before = [itemID: ConceptRecognitionResult(
+      itemIdentity: "resource:one", status: .confirmed,
+      confirmedConceptIDs: [parentID, childID], candidates: [])]
+    let after = [itemID: ConceptRecognitionResult(
+      itemIdentity: "resource:one", status: .confirmed,
+      confirmedConceptIDs: [replacementID], candidates: [])]
+
+    #expect(ConceptProposalInvalidator().changedConfirmedConceptIDs(
+      before: before, after: after, itemIDs: [itemID])
+      == [parentID, childID, replacementID])
+  }
 }
