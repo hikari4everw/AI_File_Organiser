@@ -117,6 +117,13 @@
 			remoteGlobalIDString = ABCAEEE08BE31A8DCDAF1FE4;
 			remoteInfo = AIFileOrganizerCore;
 		};
+		C3828C3644A0871037373EAD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 654E883EE21F744820BF9F2D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8C526C6724E57C214525469A;
+			remoteInfo = AIFileOrganizer;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -429,6 +436,7 @@
 			);
 			dependencies = (
 				53FB5D2D51015DDDA891532D /* PBXTargetDependency */,
+				1C8053E43279F3CB6DE00B7D /* PBXTargetDependency */,
 			);
 			name = AIFileOrganizerCoreTests;
 			packageProductDependencies = (
@@ -629,6 +637,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		1C8053E43279F3CB6DE00B7D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8C526C6724E57C214525469A /* AIFileOrganizer */;
+			targetProxy = C3828C3644A0871037373EAD /* PBXContainerItemProxy */;
+		};
 		53FB5D2D51015DDDA891532D /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = ABCAEEE08BE31A8DCDAF1FE4 /* AIFileOrganizerCore */;
@@ -707,6 +720,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.markco.AIFileOrganizer;
+				PRODUCT_MODULE_NAME = AIFileOrganizerApp;
 				PRODUCT_NAME = "AI File Organizer";
 				SDKROOT = macosx;
 			};
@@ -782,6 +796,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.markco.AIFileOrganizerCoreTests;
 				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AI File Organizer.app/Contents/MacOS/AI File Organizer";
 			};
 			name = Debug;
 		};
@@ -880,6 +895,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.markco.AIFileOrganizer;
+				PRODUCT_MODULE_NAME = AIFileOrganizerApp;
 				PRODUCT_NAME = "AI File Organizer";
 				SDKROOT = macosx;
 			};
@@ -898,6 +914,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.markco.AIFileOrganizerCoreTests;
 				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AI File Organizer.app/Contents/MacOS/AI File Organizer";
 			};
 			name = Release;
 		};

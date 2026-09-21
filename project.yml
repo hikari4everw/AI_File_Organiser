@@ -58,6 +58,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.markco.AIFileOrganizer
         PRODUCT_NAME: AI File Organizer
+        PRODUCT_MODULE_NAME: AIFileOrganizerApp
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
 
@@ -68,10 +69,13 @@ targets:
       - Tests/AIFileOrganizerCoreTests
     dependencies:
       - target: AIFileOrganizerCore
+      - target: AIFileOrganizer
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.markco.AIFileOrganizerCoreTests
         GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/AI File Organizer.app/Contents/MacOS/AI File Organizer"
+        BUNDLE_LOADER: "$(TEST_HOST)"
 
   AIFileOrganizerUITests:
     type: bundle.ui-testing
