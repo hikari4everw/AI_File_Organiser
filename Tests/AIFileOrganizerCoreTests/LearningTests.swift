@@ -60,6 +60,84 @@ import Testing
     #expect(try service.suggestRules(libraryID: libraryID).isEmpty)
   }
 
+  /// `LearningService.suggestRules` 此前**只被断言过 `.isEmpty`**（反例），
+  /// 从没有测试证明"证据充分时确实会产出规则"。
+  /// 阈值见 `LearningService.swift:105-108`：同一目标下 ≥3 个不同 itemIdentity，
+  /// 且它们的 features.keywords 有交集。
+  @Test func sufficientlySupportedMovesSuggestARuleAndRetractionRemovesIt() throws {
+    let database = try AppDatabase.inMemory()
+    let libraryID = UUID()
+    let destinationID = UUID()
+    let service = LearningService(database: database)
+
+    // 3 个不同项目，共有 keyword "piano"。
+    for index in 0..<3 {
+      try service.recordSuccessfulOperation(
+        libraryID: libraryID,
+        sessionID: UUID(),
+        operationID: UUID(),
+        itemIdentity: "score-\(index)",
+        destinationID: destinationID,
+        features: DecisionFeatures(
+          itemKind: .file, fileExtension: "pdf",
+          keywords: ["piano", "score-\(index)"]),
+        confirmation: .userApproved
+      )
+    }
+
+    let suggestion = try #require(service.suggestRules(libraryID: libraryID).first)
+    #expect(suggestion.destinationID == destinationID)
+    #expect(suggestion.condition.filenameKeywords == ["piano"])
+    #expect(suggestion.supportingSampleIDs.count == 3)
+
+    // 只有 2 个不同项目时不应产出规则（阈值是 3）。
+    let otherDestinationID = UUID()
+    for index in 0..<2 {
+      try service.recordSuccessfulOperation(
+        libraryID: libraryID,
+        sessionID: UUID(),
+        operationID: UUID(),
+        itemIdentity: "other-\(index)",
+        destinationID: otherDestinationID,
+        features: DecisionFeatures(
+          itemKind: .file, fileExtension: "pdf", keywords: ["shared", "unique-\(index)"]),
+        confirmation: .userApproved
+      )
+    }
+    #expect(
+      try !service.suggestRules(libraryID: libraryID)
+        .contains { $0.destinationID == otherDestinationID })
+
+    // 关键词不相交时同一目标也不该产出规则。
+    let disjointDestinationID = UUID()
+    for index in 0..<3 {
+      try service.recordSuccessfulOperation(
+        libraryID: libraryID,
+        sessionID: UUID(),
+        operationID: UUID(),
+        itemIdentity: "disjoint-\(index)",
+        destinationID: disjointDestinationID,
+        features: DecisionFeatures(
+          itemKind: .file, fileExtension: "pdf",
+          keywords: ["alpha-\(index)", "beta-\(index)"]),
+        confirmation: .userApproved
+      )
+    }
+    #expect(
+      try !service.suggestRules(libraryID: libraryID)
+        .contains { $0.destinationID == disjointDestinationID })
+
+    // 撤回一个样本后回落到阈值以下，建议消失。
+    let samples = try service.activeSamples(libraryID: libraryID)
+      .filter { $0.destinationID == destinationID }
+    // LearningSample.operationID 本身是可选值，需要显式解包。
+    let retractedSample = try #require(samples.first)
+    try service.retract(operationID: try #require(retractedSample.operationID))
+    #expect(
+      try !service.suggestRules(libraryID: libraryID)
+        .contains { $0.destinationID == destinationID })
+  }
+
   @Test func existingLibraryFilesRefreshWithoutDuplicatesAndEnrichDestination() throws {
     let database = try AppDatabase.inMemory()
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

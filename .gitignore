@@ -11,3 +11,9 @@ xcuserdata/
 default.profraw
 .worktrees/
 .superpowers/
+# 会话/工具产物，不属于项目内容
+.commandcode/
+# 本地评测素材（约 14 GB，含受限内容），永不提交
+/测试文件/
+# Xcode 工程内的用户级数据（根级 xcuserdata/ 覆盖不到）
+AIFileOrganizer.xcodeproj/**/xcuserdata/

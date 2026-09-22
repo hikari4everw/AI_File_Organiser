@@ -414,6 +414,179 @@ private actor ExecutionProgressRecorder {
     #expect(FileManager.default.fileExists(atPath: source.path))
   }
 
+  /// 文件级撤销阻断：目标文件在移动后被改动时，`revert` 必须拒绝回退
+  /// （`SafePlanExecutor.swift:378-380`），且**只阻断该项**，其余项照常回退。
+  /// 此前只测过目录清单变化（`directorySnapshotDetectsChangedChildrenBeforeUndo`），
+  /// 文件级快照不匹配这条分支从未被执行。
+  @Test func undoBlocksOnlyTheModifiedFileAndRevertsTheRest() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let untouchedSource = fixture.inbox.appendingPathComponent("untouched.txt")
+    let modifiedSource = fixture.inbox.appendingPathComponent("modified.txt")
+    try Data("keep-me".utf8).write(to: untouchedSource)
+    try Data("will-change".utf8).write(to: modifiedSource)
+
+    let untouchedOperation = PlannedOperation(
+      sequence: 0, kind: .move, sourcePath: untouchedSource.path,
+      destinationPath: fixture.docs.appendingPathComponent("untouched.txt").path,
+      preSnapshot: try .capture(untouchedSource))
+    let modifiedOperation = PlannedOperation(
+      sequence: 1, kind: .move, sourcePath: modifiedSource.path,
+      destinationPath: fixture.docs.appendingPathComponent("modified.txt").path,
+      preSnapshot: try .capture(modifiedSource))
+    let plan = OrganizationPlan(
+      sessionID: fixture.sessionID, operations: [untouchedOperation, modifiedOperation])
+    let executor = SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)
+
+    let executed = try await runExecution(executor, plan: plan)
+    #expect(executed.results.allSatisfy { $0.state == .completed })
+
+    // 保持字节数不变地改写内容：size 相同，只有 resourceIdentifier 会变，
+    // 因此这条断言确实在验证快照比对，而不是被体积差异蒙混过去。
+    try Data("CHANGED!!".utf8).write(
+      to: URL(fileURLWithPath: modifiedOperation.destinationPath))
+
+    let undone = try await runUndo(
+      executor, plan: plan, receipt: executed)
+    let states = Dictionary(
+      uniqueKeysWithValues: undone.results.map { ($0.operationID, $0.state) })
+    #expect(states[modifiedOperation.id] == .blocked)
+    #expect(states[untouchedOperation.id] == .undone)
+    #expect(
+      undone.results.first { $0.operationID == modifiedOperation.id }?
+        .error?.contains("目标文件已被修改或缺失") == true)
+    // 未受阻的项真的回到了原位。
+    #expect(FileManager.default.fileExists(atPath: untouchedSource.path))
+    // 受阻项保持在被改动后的位置，不会被强行挪回。
+    #expect(FileManager.default.fileExists(atPath: modifiedOperation.destinationPath))
+  }
+
+  /// 第 2 项在**预检无法察觉**的情况下于执行阶段失败 → 该项 failed，
+  /// 但执行器不会因此中止，第 3 项仍会被执行，并留下部分回执。
+  ///
+  /// 制造方式是把第 2 项的目标父目录 `chmod 0555`：预检只看
+  /// `fileExists(isDirectory:)`（对只读目录仍为 true，且 `contentsOfDirectory`
+  /// 仍可枚举），而 `FileManager.moveItem` 会因没有写权限失败（实测
+  /// NSError 513 "you don't have permission to access"）。
+  ///
+  /// 这里不能用"删除源文件"或"悬空符号链接"：前者被预检的
+  /// `源文件在方案生成后发生变化` 拦住并让整份计划抛 `planBlocked`；
+  /// 后者被预检的 `hasSiblingCollision` 枚举发现——两者都到不了执行阶段。
+  @Test func midPlanApplyingFailureDoesNotStopTheRest() async throws {
+    let fixture = try makeFixture()
+    // 目标目录会被改成只读，确保清理前恢复权限。
+    defer {
+      try? FileManager.default.setAttributes(
+        [.posixPermissions: 0o755], ofItemAtPath: fixture.docs.path)
+      try? FileManager.default.removeItem(at: fixture.root)
+    }
+    let lockedDirectory = fixture.library.appendingPathComponent("Locked", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: lockedDirectory, withIntermediateDirectories: true)
+
+    let names = ["one.txt", "two.txt", "three.txt"]
+    for name in names {
+      try Data("content-\(name)".utf8).write(to: fixture.inbox.appendingPathComponent(name))
+    }
+    let targetDirectories = [fixture.docs, lockedDirectory, fixture.docs]
+    let operations = try names.enumerated().map { index, name -> PlannedOperation in
+      let source = fixture.inbox.appendingPathComponent(name)
+      return PlannedOperation(
+        sequence: index, kind: .move, sourcePath: source.path,
+        destinationPath: targetDirectories[index].appendingPathComponent(name).path,
+        preSnapshot: try .capture(source))
+    }
+    let plan = OrganizationPlan(sessionID: fixture.sessionID, operations: operations)
+    let executor = SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)
+
+    // 只读目标目录：预检通过，apply 阶段失败。
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o555], ofItemAtPath: lockedDirectory.path)
+    #expect((await executor.preflight(plan)).isReady, "只读目录不应被预检拦下")
+
+    let outcome = try await runExecution(executor, plan: plan)
+    let states = Dictionary(uniqueKeysWithValues: outcome.results.map { ($0.operationID, $0.state) })
+    let blockedOperation = operations[1]
+
+    #expect(states[operations[0].id] == .completed)
+    #expect(states[blockedOperation.id] == .failed, "权限拒绝发生在 apply 阶段，应记为 failed")
+    #expect(states[operations[2].id] == .completed, "一项失败不应中止后续操作")
+    #expect(!outcome.wasCancelled)
+    // `isFinal` 表示"执行流已跑完"，而不是"全部成功"：正常跑完即使有失败项
+    // 也是 isFinal == true；false 只出现在取消/中断路径。
+    // 逐项结果本身已经把失败如实记录下来。
+    #expect(outcome.isFinal)
+    #expect(outcome.results.contains { $0.state == .failed })
+    // 中间回执确实落库，供跨启动恢复使用。
+    let stored = try #require(try fixture.database.receipt(planID: plan.id))
+    #expect(stored.results.count == 3)
+    // 失败项必须还原权限后才能清理，因此这里只断言未成功移动。
+    #expect(
+      FileManager.default.fileExists(
+        atPath: fixture.inbox.appendingPathComponent("two.txt").path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: fixture.docs.appendingPathComponent("one.txt").path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: fixture.docs.appendingPathComponent("three.txt").path))
+  }
+
+  /// 重跑同一不可变计划时，已完成项不得重复执行（`SafePlanExecutor.swift:167`）。
+  @Test func rerunningCompletedPlanDoesNotRepeatOperations() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let names = ["alpha.txt", "beta.txt"]
+    for name in names {
+      try Data("body-\(name)".utf8).write(to: fixture.inbox.appendingPathComponent(name))
+    }
+    let operations = try names.enumerated().map { index, name -> PlannedOperation in
+      let source = fixture.inbox.appendingPathComponent(name)
+      return PlannedOperation(
+        sequence: index, kind: .move, sourcePath: source.path,
+        destinationPath: fixture.docs.appendingPathComponent(name).path,
+        preSnapshot: try .capture(source))
+    }
+    let plan = OrganizationPlan(sessionID: fixture.sessionID, operations: operations)
+    let executor = SafePlanExecutor(workspace: fixture.workspace, database: fixture.database)
+
+    let first = try await runExecution(executor, plan: plan)
+    #expect(first.results.allSatisfy { $0.state == .completed })
+
+    // 重跑：源已消失、目标快照一致、数据库状态为 completed → 视为已完成。
+    #expect((await executor.preflight(plan)).isReady)
+    let second = try await runExecution(executor, plan: plan)
+    #expect(second.results.allSatisfy { $0.state == .completed })
+    #expect(second.results.map(\.operationID) == first.results.map(\.operationID))
+    for name in names {
+      let path = fixture.docs.appendingPathComponent(name).path
+      #expect(FileManager.default.fileExists(atPath: path))
+      #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == Data("body-\(name)".utf8))
+    }
+  }
+
+  /// 收集执行流，返回最终回执。
+  private func runExecution(
+    _ executor: SafePlanExecutor, plan: OrganizationPlan
+  ) async throws -> ExecutionReceipt {
+    var receipt: ExecutionReceipt?
+    for try await event in executor.execute(plan) {
+      if case .finished(let value) = event { receipt = value }
+    }
+    return try #require(receipt)
+  }
+
+  /// 收集撤销流，返回最终回执。
+  private func runUndo(
+    _ executor: SafePlanExecutor, plan: OrganizationPlan, receipt: ExecutionReceipt
+  ) async throws -> ExecutionReceipt {
+    var undone: ExecutionReceipt?
+    for try await event in executor.undo(plan: plan, receipt: receipt) {
+      if case .finished(let value) = event { undone = value }
+    }
+    return try #require(undone)
+  }
+
   @Test func staleFolderProposalCannotOverrideManualDestination() throws {
     let fixture = try makeFixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }

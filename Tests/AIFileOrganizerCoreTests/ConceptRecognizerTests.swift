@@ -160,4 +160,51 @@ import Testing
     #expect(result.status == .unknown)
     #expect(result.candidates.isEmpty)
   }
+
+  /// `isConfident` 要求视觉分数 ≥ 0.75（`ConceptRecognizer.swift:138`）。
+  /// 既有用例覆盖了"差值不足"和"文本不套用视觉阈值"，但**没有任何用例**
+  /// 把分数压到阈值下方——阈值一旦被误调低，误导会被静默放过。
+  @Test func visualScoreJustBelowThresholdIsNotConfident() {
+    let concept = FileConcept(name: "漫画")
+    // cos 相似度 ≈ 0.70 < 0.75；只有一个概念，故差值条件必然满足。
+    let example = ConceptExample(
+      conceptID: concept.id, itemIdentity: "example", isPositive: true,
+      features: ConceptFeatureSnapshot(
+        modelVersion: version, itemKind: .directory, visualVector: [1, 0]))
+
+    let result = ConceptRecognizer().recognize(
+      itemIdentity: "new", features: ConceptFeatureSnapshot(
+        modelVersion: version, itemKind: .directory, visualVector: [0.70, 0.71414284]),
+      concepts: [concept], examples: [example])
+
+    #expect(result.status == .needsReview)
+    // 候选本身仍然要给出来——只是不能标为高置信。
+    #expect(result.candidates.map(\.conceptID) == [concept.id])
+    #expect(result.confirmedConceptIDs.isEmpty)
+  }
+
+  /// 查询特征的模型版本与固定的视觉模型不一致时，视觉相似度**根本不参与比对**
+  /// （候选计算本身就要求查询与示例的 `modelVersion` 相同），因此既不会产生
+  /// 候选、也不可能标为高置信——降级方向是保守的。
+  ///
+  /// 注意 `isConfident` 里那句 `features.modelVersion == ConceptModelManager.modelVersion`
+  /// 因此是**冗余的纵深防御**：它已被候选计算的前提覆盖。本用例把这个事实固化下来，
+  /// 以免将来放宽候选计算时误以为还有一层保护。
+  @Test func unversionedQueryProducesNoCandidateRatherThanMisconfidence() {
+    let concept = FileConcept(name: "漫画")
+    let example = ConceptExample(
+      conceptID: concept.id, itemIdentity: "example", isPositive: true,
+      features: ConceptFeatureSnapshot(
+        modelVersion: version, itemKind: .directory, visualVector: [1, 0]))
+
+    let result = ConceptRecognizer().recognize(
+      itemIdentity: "new", features: ConceptFeatureSnapshot(
+        modelVersion: "some-other-visual-model", itemKind: .directory,
+        visualVector: [1, 0]),
+      concepts: [concept], examples: [example])
+
+    #expect(result.status == .unknown)
+    #expect(result.candidates.isEmpty)
+    #expect(result.confirmedConceptIDs.isEmpty)
+  }
 }

@@ -11,10 +11,15 @@ private struct ConstantImageEmbedder: ImageEmbeddingProvider {
 }
 
 @Suite struct ConceptFeatureTests {
-  @Test func localMobileCLIPPackageProducesFeaturesWhenSupplied() throws {
-    guard let path = ProcessInfo.processInfo.environment["AI_FILE_ORGANIZER_TEST_MODEL"] else {
-      return
-    }
+  /// 本地已编译 MobileCLIP 包的可选路径。测试环境不提供时，
+  /// 依赖它的用例会显示为 **skipped**，而不是零断言"绿过"。
+  private static var localModelPath: String? {
+    ProcessInfo.processInfo.environment["AI_FILE_ORGANIZER_TEST_MODEL"]
+  }
+
+  @Test(.enabled(if: ConceptFeatureTests.localModelPath != nil))
+  func localMobileCLIPPackageProducesFeaturesWhenSupplied() throws {
+    let path = try #require(Self.localModelPath)
     let bitmap = NSBitmapImageRep(
       bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64,
       bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
@@ -24,6 +29,35 @@ private struct ConstantImageEmbedder: ImageEmbeddingProvider {
     let vector = try provider.embedding(for: image)
     #expect(vector.count == 512)
     #expect(vector.allSatisfy { $0.isFinite })
+  }
+
+  /// 固定版本模型是本项目唯一的网络下载物，其身份常量一旦被改坏，
+  /// 已保存的概念特征就会与新特征不可比（识别会静默全部降级为待审核）。
+  /// 这里断言恒等/形状，不需要下载 173 MB 权重。
+  @Test func pinnedModelIdentityIsStableAndMissingModelFailsClosed() throws {
+    #expect(!ConceptModelManager.modelVersion.isEmpty)
+    #expect(ConceptModelManager.modelVersion == "mobileclip-blt-3e0a7bfb")
+
+    let manager = ConceptModelManager()
+    #expect(manager.compiledModelURL.lastPathComponent == "MobileCLIP-BLT.mlmodelc")
+    #expect(
+      manager.compiledModelURL.path.contains("AI File Organizer/Concept Models"),
+      "模型目录变更会让已安装用户重新下载，需显式确认")
+
+    // 未安装模型时必须返回 nil（降级为文本候选），而不是抛错或返回半成品。
+    if !manager.isInstalled {
+      #expect(try manager.provider() == nil)
+    }
+
+    // 指向不存在的包时必须抛错，而不是构造出一个会在推理时崩掉的 provider。
+    var thrown: (any Error)?
+    do {
+      _ = try MobileCLIPImageEmbeddingProvider(
+        modelURL: URL(fileURLWithPath: "/tmp/aifo-missing-\(UUID().uuidString).mlmodelc"))
+    } catch {
+      thrown = error
+    }
+    #expect(thrown != nil)
   }
 
   @Test func modelFileMustMatchPinnedSizeAndDigest() throws {

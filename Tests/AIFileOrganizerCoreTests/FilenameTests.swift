@@ -10,6 +10,28 @@ private struct FilenameTestExtractor: ContentExtractor {
   }
 }
 
+/// 捕获并返回抛出的错误，供按具体 case 与文案断言。
+///
+/// `OrganizerError` 没有 `Equatable`，所以无法写成
+/// `#expect(throws: OrganizerError.invalidFilename("…"))`；
+/// 而只写 `#expect(throws: OrganizerError.self)` 会让任意
+/// `OrganizerError` 都通过——包括与用例意图完全无关的那些。
+private func capturedError(_ body: () throws -> some Any) -> OrganizerError? {
+  do {
+    _ = try body()
+    return nil
+  } catch let error as OrganizerError {
+    return error
+  } catch {
+    return nil
+  }
+}
+
+private func errorDescription(of error: OrganizerError?) -> String {
+  guard let error else { return "<没有抛出错误>" }
+  return error.errorDescription ?? String(describing: error)
+}
+
 private struct FilenameTestProvider: FilenameSuggestionProvider {
   var availabilityDescription: String { available ? "available" : "unavailable" }
   let available: Bool
@@ -53,15 +75,20 @@ private enum FilenameSemanticTestError: Error {
   }
 
   @Test func templateRejectsUnknownAndUnclosedPlaceholders() {
-    #expect(throws: OrganizerError.self) {
+    let unknownField = capturedError {
       try FilenameTemplateEngine().validate(FilenameTemplate(pattern: "{作曲家} - {标题}"))
     }
-    #expect(throws: OrganizerError.self) {
+    #expect(errorDescription(of: unknownField).contains("不支持命名字段：{作曲家}"))
+
+    let unclosed = capturedError {
       try FilenameTemplateEngine().validate(FilenameTemplate(pattern: "{标题"))
     }
-    #expect(throws: OrganizerError.self) {
+    #expect(errorDescription(of: unclosed).contains("括号不匹配"))
+
+    let empty = capturedError {
       try FilenameTemplateEngine().validate(FilenameTemplate(pattern: "   "))
     }
+    #expect(errorDescription(of: empty).contains("命名模板不能为空"))
   }
 
   @Test func validatorPreservesFileExtensionAndNormalizesName() throws {
@@ -82,9 +109,11 @@ private enum FilenameSemanticTestError: Error {
       sessionID: UUID(), path: "/tmp/source.pdf", name: "source.pdf", kind: .file,
       fileExtension: "pdf")
 
-    #expect(throws: OrganizerError.self) {
+    let error = capturedError {
       try FilenameValidator().validatedFullName(baseName: "renamed.pdf", item: item)
     }
+    // 必须是"不要重复输入扩展名"这条，而不是别的 invalidFilename。
+    #expect(errorDescription(of: error).contains("请勿在主文件名中输入扩展名"))
   }
 
   @Test func validatorTreatsDirectoryNameAsCompleteName() throws {
@@ -102,9 +131,18 @@ private enum FilenameSemanticTestError: Error {
       sessionID: UUID(), path: "/tmp/source.txt", name: "source.txt", kind: .file,
       fileExtension: "txt")
 
-    #expect(throws: OrganizerError.self) {
+    let error = capturedError {
       try FilenameValidator().validatedFullName(baseName: candidate, item: item)
     }
+    // 每个候选都必须命中它该命中的那条拒绝理由，
+    // 而不是"随便抛个 OrganizerError 就算过"。
+    let expected: String
+    switch candidate {
+    case "": expected = "文件名不能为空"
+    case ".", "..", ".hidden": expected = "不能使用隐藏或保留名称"
+    default: expected = "文件名包含非法字符"
+    }
+    #expect(errorDescription(of: error).contains(expected))
   }
 
   @Test func validatorRejectsNamesLongerThanSafetyBudget() {
@@ -112,9 +150,11 @@ private enum FilenameSemanticTestError: Error {
       sessionID: UUID(), path: "/tmp/source.txt", name: "source.txt", kind: .file,
       fileExtension: "txt")
 
-    #expect(throws: OrganizerError.self) {
-      try FilenameValidator().validatedFullName(baseName: String(repeating: "乐", count: 80), item: item)
+    let error = capturedError {
+      try FilenameValidator().validatedFullName(
+        baseName: String(repeating: "乐", count: 80), item: item)
     }
+    #expect(errorDescription(of: error).contains("文件名过长"))
   }
 
   @Test func validatorRejectsApplicationBundles() {
@@ -122,9 +162,11 @@ private enum FilenameSemanticTestError: Error {
       sessionID: UUID(), path: "/tmp/Example.app", name: "Example.app", kind: .applicationBundle,
       fileExtension: "app")
 
-    #expect(throws: OrganizerError.self) {
+    let error = capturedError {
       try FilenameValidator().validatedFullName(baseName: "Renamed", item: item)
     }
+    // 应用包必须走"不支持改名"这条专属拒绝，而不是被其它规则顺带拦下。
+    #expect(errorDescription(of: error).contains("应用包不支持改名"))
   }
 
   @Test func namingRuleProducesSelectedRenameWhenFieldsAreAvailable() throws {
