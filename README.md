@@ -32,12 +32,22 @@
 swift test
 swift run AIFileOrganizerChecks
 swift run AIFileOrganizer
-./Scripts/build-app.sh
+./scripts/build-app.sh
 xcodegen generate
 xcodebuild -project AIFileOrganizer.xcodeproj -scheme AIFileOrganizer test
 ```
 
 命令行打包脚本生成 ad-hoc 签名的本机 `.app`。Developer ID 签名、公证和正式分发需要付费 Apple Developer 账号，当前不在完成条件内。
+
+当前测试基线为 **205 个单元测试（25 个套件）**，另有 `AIFileOrganizerChecks` 的 11 项核心安全检查。若本机 SwiftPM 的用户级缓存不可写（受限环境），需要显式指定可写的模块缓存并关闭沙箱：
+
+```bash
+CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" \
+SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/module-cache" \
+swift test --disable-sandbox
+```
+
+概念特征提取用例默认跳过：它们需要本地已编译的 MobileCLIP 包，通过 `AI_FILE_ORGANIZER_TEST_MODEL` 指向该包路径才会执行。
 
 如果本机 Command Line Tools 的编译器与 macOS 26 SDK 不匹配，可临时用随附的 15.4 SDK 验证基础模式：
 
