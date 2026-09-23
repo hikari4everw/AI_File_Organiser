@@ -47,6 +47,7 @@ public struct WorkNameParser: Sendable {
         let author = String(header[header.index(after: open)..<header.index(before: header.endIndex)])
           .trimmingCharacters(in: .whitespacesAndNewlines)
         hasMultipleAuthors = author.contains(" & ") || author.contains("、")
+          || author.contains(" / ") || author.contains("／") || author.contains("＋")
         if !hasMultipleAuthors, !author.isEmpty {
           authors = author.components(separatedBy: " / ")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

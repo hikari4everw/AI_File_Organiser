@@ -11,11 +11,12 @@ public struct DestinationIndexer: Sendable {
   public func index(
     workspace: Workspace,
     maxDepth: Int,
-    kindsByRelativePath: [String: DestinationKind] = [:]
+    kindsByRelativePath: [String: DestinationKind] = [:],
+    roleOverrides: [String: LibraryNodeRole] = [:]
   ) throws -> [DestinationProfile] {
     let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
     let rolesByPath = Dictionary(uniqueKeysWithValues: try LibraryWorkIndexer()
-      .index(root: library).nodes.map { ($0.relativePath, $0.role) })
+      .index(root: library, roleOverrides: roleOverrides).nodes.map { ($0.relativePath, $0.role) })
     let boundedDepth = max(1, maxDepth)
     var discovered: [(URL, String, Int, DestinationKind)] = []
     try discover(
@@ -69,7 +70,8 @@ public struct DestinationIndexer: Sendable {
       else { continue }
       let relative = relativePath(of: child, inside: root)
       let inferred = roles[relative]
-      let kind = kinds[relative] ?? (inferred == .work ? .collection : .category)
+      let kind = kinds[relative]
+        ?? (inferred == .work ? .collection : inferred == .uncertain ? .uncertain : .category)
       if inferred != .work && inferred != .creator || kinds[relative] != nil {
         output.append((child, relative, depth, kind))
       }

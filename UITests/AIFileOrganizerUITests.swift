@@ -52,6 +52,24 @@
     }
 
     @MainActor
+    func testCatalogCoverageAndActionCountAreVisible() {
+      let app = XCUIApplication()
+      app.launchArguments = [
+        "-ui-testing-reset", "-ui-testing-workspace-demo", "-ApplePersistenceIgnoreState", "YES",
+      ]
+      app.launch()
+
+      XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+        format: "label CONTAINS %@", "移动 1 项")).firstMatch.waitForExistence(timeout: 5))
+      app.buttons["资料库画像"].click()
+      XCTAssertTrue(app.staticTexts["内容覆盖 1 / 1 部 · 缓存复用 1 部"]
+        .waitForExistence(timeout: 5))
+      XCTAssertTrue(app.buttons["分析或更新目录画像"].exists)
+      app.buttons["作者身份"].click()
+      XCTAssertTrue(app.staticTexts["仅确认过的别名会参与作者匹配；搜索只在你点击后打开浏览器。"].exists)
+    }
+
+    @MainActor
     func testRejectedRenameShowsOriginalNameState() {
       let app = XCUIApplication()
       app.launchArguments = [

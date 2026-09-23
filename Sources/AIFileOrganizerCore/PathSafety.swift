@@ -54,6 +54,13 @@ public enum PathSafety {
     guard !relativePath.isEmpty, !relativePath.hasPrefix("/"), !relativePath.contains("..") else {
       throw OrganizerError.invalidWorkspace("目标目录不合法")
     }
+    var componentURL = normalized(library)
+    for component in relativePath.split(separator: "/") {
+      componentURL.appendPathComponent(String(component), isDirectory: true)
+      if (try? componentURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+        throw OrganizerError.invalidWorkspace("目标目录不能经过符号链接")
+      }
+    }
     let result = normalized(library.appendingPathComponent(relativePath, isDirectory: true))
     guard contains(library, result) else {
       throw OrganizerError.invalidWorkspace("目标目录超出资料库范围")

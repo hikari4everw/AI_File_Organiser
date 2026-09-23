@@ -11,6 +11,33 @@ private actor ExecutionProgressRecorder {
 }
 
 @Suite struct ExecutorTests {
+  @Test func preflightRejectsCreatorDirectoryReplacedByInternalSymlinkAfterReview() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let creator = fixture.docs.appendingPathComponent("作者", isDirectory: true)
+    let other = fixture.library.appendingPathComponent("Other/作者", isDirectory: true)
+    try FileManager.default.createDirectory(at: creator, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+    let source = fixture.inbox.appendingPathComponent("[社团 (作者)] 作品", isDirectory: true)
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try Data([1]).write(to: source.appendingPathComponent("001.jpg"))
+    let item = ItemSnapshot(sessionID: fixture.sessionID, path: source.path,
+      name: source.lastPathComponent, kind: .directory)
+    let category = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let proposal = ClassificationProposal(sessionID: fixture.sessionID, itemID: item.id,
+      action: .move, destinationID: category.id, source: .deterministic,
+      reviewDecision: .ready, reason: "creator",
+      creatorDestinationPath: "Docs/作者")
+    let plan = try PlanBuilder().build(sessionID: fixture.sessionID,
+      workspace: fixture.workspace, items: [item], destinations: [category],
+      proposals: [proposal], folderProposals: [])
+    try FileManager.default.removeItem(at: creator)
+    try FileManager.default.createSymbolicLink(at: creator, withDestinationURL: other)
+    let report = await SafePlanExecutor(workspace: fixture.workspace,
+      database: fixture.database).preflight(plan)
+    #expect(!report.isReady)
+    #expect(report.issues.contains { $0.message.contains("符号链接") })
+  }
   @Test func approvedCreatorFolderIsNestedUnderKnownCategoryAndUndoKeepsCategory() async throws {
     let fixture = try makeFixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -74,6 +101,25 @@ private actor ExecutionProgressRecorder {
       database: fixture.database, catalogRevision: "r1").preflight(allowed)).isReady)
     #expect(!(await SafePlanExecutor(workspace: fixture.workspace,
       database: fixture.database, catalogRevision: "r2").preflight(allowed)).isReady)
+  }
+
+  @Test func selectedWorkAlreadyAtCategoryRootDoesNotMoveOntoItself() throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.docs.appendingPathComponent("old-work", isDirectory: true)
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try Data("page".utf8).write(to: source.appendingPathComponent("01.jpg"))
+    let item = ItemSnapshot(sessionID: fixture.sessionID, path: source.path,
+      name: source.lastPathComponent, kind: .directory)
+    let category = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let proposal = ClassificationProposal(sessionID: fixture.sessionID, itemID: item.id,
+      action: .move, destinationID: category.id, source: .deterministic,
+      reviewDecision: .ready, reason: "known category")
+    let plan = try PlanBuilder().build(sessionID: fixture.sessionID,
+      workspace: fixture.workspace, items: [item], destinations: [category],
+      proposals: [proposal], folderProposals: [], selectedSourceIDs: [item.id],
+      catalogRevision: "r1")
+    #expect(plan.operations.isEmpty)
   }
 
   @Test func legacyPlanCannotMoveLibrarySource() async throws {

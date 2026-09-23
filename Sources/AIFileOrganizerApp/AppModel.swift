@@ -24,6 +24,13 @@ final class AppModel: ObservableObject {
   @Published var receipt: ExecutionReceipt?
   @Published var rules: [OrganizationRule] = []
   @Published var concepts: [FileConcept] = []
+  @Published var libraryIndex: LibraryWorkIndex?
+  @Published var catalog: CatalogAnalysisResult?
+  @Published var catalogStatus = "尚未分析资料库"
+  @Published var catalogNeedsRefresh = false
+  @Published var selectedExistingWorkPaths: Set<String> = []
+  @Published var selectedSourceIDs: Set<UUID> = []
+  @Published var creatorIdentities: [CreatorIdentity] = []
   @Published var recognitionByItem: [UUID: ConceptRecognitionResult] = [:]
   @Published var conceptModelStatus = "正在检查概念模型…"
   @Published var isDownloadingConceptModel = false
@@ -44,11 +51,13 @@ final class AppModel: ObservableObject {
   private var planPreparationTask: Task<OrganizationPlan, Error>?
   private var activeExecutor: SafePlanExecutor?
 
-  init() {
+  init(database injectedDatabase: AppDatabase? = nil) {
     let isUITesting = ProcessInfo.processInfo.arguments.contains("-ui-testing-reset")
     do {
       let database: AppDatabase
-      if isUITesting {
+      if let injectedDatabase {
+        database = injectedDatabase
+      } else if isUITesting {
         let url = Self.uiTestingDatabaseURL
         for suffix in ["", "-wal", "-shm"] {
           try? FileManager.default.removeItem(atPath: url.path + suffix)
@@ -72,7 +81,7 @@ final class AppModel: ObservableObject {
           self?.conceptModelStatus = status
         }
       }
-      if isUITesting {
+      if isUITesting && injectedDatabase == nil {
         try database.clearWorkspaces()
       }
       if ProcessInfo.processInfo.arguments.contains("-ui-testing-progress-demo") {
@@ -186,6 +195,15 @@ final class AppModel: ObservableObject {
     destinations = [destination]
     proposals = [proposal]
     renameProposals = [rename]
+    catalog = CatalogAnalysisResult(profiles: [CatalogProfile(
+      relativePath: destination.relativePath, workNames: [item.name],
+      nameFrequencies: [:], totalWorks: 1, contentAnalyzedWorks: 1,
+      userPurpose: "乐谱", referenceWorkPaths: [])],
+      workAnalyses: [], reusedWorkCount: 1, revision: "ui-demo")
+    catalogStatus = "已分析 1 个分类、1 部作品；复用 1 部缓存"
+    libraryIndex = LibraryWorkIndex(nodes: [LibraryWorkNode(
+      relativePath: destination.relativePath + "/" + item.name,
+      role: .work, kind: .file)])
     selectedItemID = item.id
     statusMessage = "方案已生成，请确认移动位置"
     modelStatus = "Apple 本地模型可用"
@@ -241,7 +259,8 @@ final class AppModel: ObservableObject {
   }
 
   var canExecute: Bool {
-    !isWorking && !isTeachingConcept && receipt == nil && workspace != nil
+    !isWorking && !isTeachingConcept && !catalogNeedsRefresh
+      && receipt == nil && workspace != nil
       && (!readyProposals.isEmpty || folderProposals.contains { $0.status == .approved }
         || !selectedRenameProposals.isEmpty)
   }
@@ -261,6 +280,300 @@ final class AppModel: ObservableObject {
     }
   }
 
+  func setCatalogPurpose(_ purpose: String, for relativePath: String) {
+    guard let workspace, let database else { return }
+    do {
+      try CatalogAnalysisService(database: database).setPurpose(
+        purpose, for: relativePath, workspaceID: workspace.id)
+      invalidateCatalogSuggestions()
+      catalogStatus = "目录用途已保存；请重新分析资料库"
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func setCatalogRole(_ role: LibraryNodeRole, for relativePath: String) {
+    guard let workspace, let database else { return }
+    do {
+      try CatalogAnalysisService(database: database).setRole(
+        role, for: relativePath, workspaceID: workspace.id)
+      invalidateCatalogSuggestions()
+      catalogStatus = "目录角色已保存；请重新分析资料库"
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func setCatalogWorkExcluded(_ excluded: Bool, workPath: String, categoryPath: String) {
+    guard let workspace, let database else { return }
+    do {
+      try CatalogAnalysisService(database: database).setExcluded(excluded,
+        workPath: workPath, categoryPath: categoryPath, workspaceID: workspace.id)
+      invalidateCatalogSuggestions()
+      catalogStatus = "样本排除状态已保存；请重新分析资料库"
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func setCatalogReference(_ reference: Bool, workPath: String, categoryPath: String) {
+    guard let workspace, let database else { return }
+    do {
+      try CatalogAnalysisService(database: database).setReference(reference,
+        workPath: workPath, categoryPath: categoryPath, workspaceID: workspace.id)
+      invalidateCatalogSuggestions()
+      catalogStatus = "参考作品已保存；请重新分析资料库"
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func confirmCreatorAlias(_ alias: String, creatorID: UUID, sourceURL: String) {
+    guard let workspace, let database else { return }
+    do {
+      try CreatorCatalog(database: database).confirmAlias(
+        alias, for: creatorID, sourceURL: sourceURL)
+      creatorIdentities = try database.creatorIdentities(workspaceID: workspace.id)
+      invalidateCatalogSuggestions()
+      statusMessage = "作者别名已确认；请重新分析建议"
+    } catch { lastError = error.localizedDescription }
+  }
+
+  func refreshCatalog() {
+    guard let workspace, let database, !isWorking else { return }
+    isWorking = true
+    catalogStatus = "正在分析资料库…"
+    runningTask = Task { [weak self] in
+      guard let self else { return }
+      defer { self.isWorking = false; self.runningTask = nil; self.progress = nil }
+      do {
+        let access = try SecurityScopedBookmarks.resolve(workspace)
+        defer { access.stop() }
+        let root = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+        let roleOverrides = try database.catalogProfileOverrides(workspaceID: workspace.id)
+          .compactMapValues { $0.role }
+        let index = try LibraryWorkIndexer().index(root: root, roleOverrides: roleOverrides)
+        let result = try await CatalogAnalysisService(database: database).analyze(
+          index: index, workspaceID: workspace.id, root: root,
+          progress: { [weak self] completed, total in
+            await MainActor.run {
+              self?.progress = OrganizationProgress(phase: .analyzing,
+                completed: completed, total: total, isCancellable: true)
+            }
+          })
+        try Task.checkCancellation()
+        self.libraryIndex = index
+        self.catalog = result
+        self.catalogNeedsRefresh = false
+        let indexed = try DestinationCatalogService().index(workspace: workspace,
+          maxDepth: 4, roleOverrides: roleOverrides)
+        self.destinations = try LearningService(database: database).enrich(
+          destinations: indexed, libraryID: workspace.id)
+        self.catalogStatus = "已分析 \(result.profiles.count) 个分类、\(result.workAnalyses.count) 部作品；复用 \(result.reusedWorkCount) 部缓存"
+        if let session = self.session, !self.items.isEmpty {
+          let resolutions = try self.creatorResolutions(
+            for: self.items, workspace: workspace, database: database)
+          let classified = await ClassificationPipeline().run(
+            sessionID: session.id, items: self.items,
+            destinations: self.destinations.filter { $0.kind == .category },
+            rules: self.rules, concepts: self.concepts,
+            recognitionByItem: self.recognitionByItem,
+            catalog: result, creatorResolutions: resolutions)
+          let old = Dictionary(uniqueKeysWithValues: self.proposals.map { ($0.itemID, $0) })
+          self.proposals = classified.proposals.map { proposal in
+            if self.decisionLocks.contains(proposal.itemID) {
+              return old[proposal.itemID] ?? proposal
+            }
+            guard let item = self.items.first(where: { $0.id == proposal.itemID }) else {
+              return proposal
+            }
+            return self.normalizeExistingWorkProposal(proposal, item: item)
+          }
+          self.folderProposals = classified.folderProposals.compactMap { folder in
+            var value = folder
+            value.relatedItemIDs.removeAll { self.decisionLocks.contains($0) }
+            return value.relatedItemIDs.isEmpty ? nil : value
+          }
+          try database.saveProposals(self.proposals)
+          try database.saveFolderProposals(self.folderProposals)
+        }
+        self.statusMessage = "目录画像已更新，请检查新的整理建议"
+      } catch is CancellationError {
+        self.catalogStatus = "目录分析已取消"
+      } catch {
+        self.catalogStatus = "目录分析失败"
+        self.lastError = error.localizedDescription
+      }
+    }
+  }
+
+  func includeSelectedExistingWorks() {
+    guard let workspace, let database, let session, let catalog, let libraryIndex,
+      !isWorking, !selectedExistingWorkPaths.isEmpty else { return }
+    let selected = libraryIndex.nodes.filter {
+      $0.role == .work && selectedExistingWorkPaths.contains($0.relativePath)
+    }
+    guard !selected.isEmpty else { return }
+    isWorking = true
+    runningTask = Task { [weak self] in
+      guard let self else { return }
+      defer { self.isWorking = false; self.runningTask = nil }
+      do {
+        let access = try SecurityScopedBookmarks.resolve(workspace)
+        defer { access.stop() }
+        let root = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+        let existingPaths = Set(self.items.map(\.path))
+        let newItems = selected.compactMap { node -> ItemSnapshot? in
+          let url = root.appendingPathComponent(node.relativePath)
+          guard !existingPaths.contains(url.path),
+            FileManager.default.fileExists(atPath: url.path),
+            (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true
+          else { return nil }
+          return ItemSnapshot(sessionID: session.id, path: url.path,
+            name: url.lastPathComponent, kind: node.kind,
+            fileExtension: url.pathExtension.lowercased())
+        }
+        guard !newItems.isEmpty else { return }
+        let resolutions = try self.creatorResolutions(
+          for: newItems, workspace: workspace, database: database)
+        let result = await ClassificationPipeline().run(sessionID: session.id,
+          items: newItems, destinations: self.destinations.filter { $0.kind == .category },
+          rules: self.rules, concepts: self.concepts, catalog: catalog,
+          creatorResolutions: resolutions)
+        try Task.checkCancellation()
+        self.items.append(contentsOf: newItems)
+        self.selectedSourceIDs.formUnion(newItems.map(\.id))
+        self.proposals.append(contentsOf: result.proposals.compactMap { proposal in
+          guard let item = newItems.first(where: { $0.id == proposal.itemID }) else { return nil }
+          return self.normalizeExistingWorkProposal(proposal, item: item)
+        })
+        self.folderProposals.append(contentsOf: result.folderProposals)
+        self.selectedExistingWorkPaths.removeAll()
+        try database.saveSnapshots(newItems)
+        try database.saveProposals(result.proposals)
+        try database.saveFolderProposals(result.folderProposals)
+        self.statusMessage = "已将 \(newItems.count) 部旧作加入本次复核"
+      } catch { self.lastError = error.localizedDescription }
+    }
+  }
+
+  private func invalidateCatalogSuggestions() {
+    currentPlan = nil
+    catalog = nil
+    catalogNeedsRefresh = true
+    for index in proposals.indices where proposals[index].source != .user {
+      proposals[index].reviewDecision = .needsReview
+      proposals[index].status = .pending
+      proposals[index].reason = "目录画像已更新，请重新分析后确认"
+      proposals[index].catalogRevision = nil
+    }
+    for index in folderProposals.indices { folderProposals[index].status = .pending }
+    try? database?.saveProposals(proposals)
+    try? database?.saveFolderProposals(folderProposals)
+  }
+
+  func creatorResolutions(
+    for items: [ItemSnapshot], workspace: Workspace, database: AppDatabase
+  ) throws -> [UUID: CreatorResolution] {
+    let creatorCatalog = CreatorCatalog(database: database)
+    let existingCreators = libraryIndex?.nodes.filter { $0.role == .creator } ?? []
+    let libraryRoot = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    var result: [UUID: CreatorResolution] = [:]
+    for item in items {
+      let parsed = WorkNameParser().parse(item.name)
+      let resolution = try creatorCatalog.resolve(parsed, workspaceID: workspace.id)
+      let identity: CreatorIdentity?
+      if case .unknown = resolution, parsed.authorNames.count == 1 {
+        identity = CreatorIdentity(workspaceID: workspace.id,
+          japaneseName: parsed.authorNames[0], englishName: nil,
+          circleName: parsed.circleName)
+      } else if case .confirmed(let confirmed) = resolution {
+        identity = confirmed
+      } else {
+        identity = nil
+      }
+      if var identity {
+        identity.preferredDestinations = identity.preferredDestinations.filter { _, path in
+          let url = libraryRoot.appendingPathComponent(path, isDirectory: true)
+          return FileManager.default.fileExists(atPath: url.path)
+            && (try? PathSafety.safeDestination(library: libraryRoot,
+              relativePath: path)) != nil
+        }
+        let matches = existingCreators.filter { node in
+          let path = node.relativePath
+          let folder = (path as NSString).lastPathComponent
+          let parent = (path as NSString).deletingLastPathComponent
+          let url = libraryRoot.appendingPathComponent(path, isDirectory: true)
+          return destinations.contains { $0.relativePath == parent && $0.kind == .category }
+            && CreatorCatalog.key(folder) == CreatorCatalog.key(identity.proposedDirectoryName)
+            && FileManager.default.fileExists(atPath: url.path)
+            && (try? PathSafety.safeDestination(library: libraryRoot,
+              relativePath: path)) == PathSafety.normalized(url)
+        }
+        if matches.count == 1 {
+          let path = matches[0].relativePath
+          let parent = (path as NSString).deletingLastPathComponent
+          identity.preferredDestinations[parent] = path
+        }
+        result[item.id] = .confirmed(identity)
+      } else {
+        result[item.id] = resolution
+      }
+    }
+    return result
+  }
+
+  var existingCreatorPaths: [String] {
+    libraryIndex?.nodes.filter { $0.role == .creator }.map(\.relativePath) ?? []
+  }
+
+  func setCreatorDestination(_ path: String, for itemIDs: Set<UUID>) {
+    guard let workspace, let session, !itemIDs.isEmpty else { return }
+    let root = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    guard existingCreatorPaths.contains(path),
+      FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path),
+      (try? PathSafety.safeDestination(library: root, relativePath: path)) != nil,
+      let category = destinations.first(where: {
+        $0.kind == .category && $0.relativePath == (path as NSString).deletingLastPathComponent
+      }) else {
+      lastError = "现有作者目录不可用"
+      return
+    }
+    currentPlan = nil
+    decisionLocks.formUnion(itemIDs)
+    detachFromFolderProposals(itemIDs)
+    for index in proposals.indices where itemIDs.contains(proposals[index].itemID) {
+      proposals[index].destinationID = category.id
+      proposals[index].creatorDestinationPath = path
+      proposals[index].creatorID = nil
+      proposals[index].suggestedFolderName = nil
+      proposals[index].action = .move
+      proposals[index].reviewDecision = .ready
+      proposals[index].status = .overridden
+      proposals[index].source = .user
+      proposals[index].reason = "由你指定现有作者目录"
+      try? database?.saveDecision(DecisionRecord(sessionID: session.id,
+        itemID: proposals[index].itemID, originalDestinationID: nil,
+        finalDestinationID: category.id, action: "override_creator_folder"))
+    }
+    try? database?.saveProposals(proposals)
+    selectedItemIDs.subtract(itemIDs)
+  }
+
+  func normalizeExistingWorkProposal(
+    _ proposal: ClassificationProposal, item: ItemSnapshot
+  ) -> ClassificationProposal {
+    guard let workspace, proposal.action == .move,
+      proposal.creatorDestinationPath == nil, proposal.suggestedFolderName == nil,
+      let destinationID = proposal.destinationID,
+      let destination = destinations.first(where: { $0.id == destinationID })
+    else { return proposal }
+    let source = URL(fileURLWithPath: item.path)
+    let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    guard PathSafety.contains(library, source),
+      PathSafety.normalized(source.deletingLastPathComponent()).path
+        == PathSafety.normalized(library.appendingPathComponent(destination.relativePath)).path
+    else { return proposal }
+    var result = proposal
+    result.action = .keep
+    result.destinationID = nil
+    result.reviewDecision = .keep
+    result.reason = "作品已位于目标分类"
+    return result
+  }
+
   func forgetWorkspace() {
     guard !isWorking else { return }
     do {
@@ -272,6 +585,11 @@ final class AppModel: ObservableObject {
     workspace = nil
     resetSession()
     destinations = []
+    catalog = nil
+    libraryIndex = nil
+    creatorIdentities = []
+    catalogStatus = "尚未分析资料库"
+    catalogNeedsRefresh = false
     rules = []
     ruleDrafts = []
     namingRules = []
@@ -305,7 +623,27 @@ final class AppModel: ObservableObject {
       do {
         let access = try SecurityScopedBookmarks.resolve(workspace)
         defer { access.stop() }
-        let indexed = try DestinationCatalogService().index(workspace: workspace, maxDepth: 4)
+        self.statusMessage = "正在分析资料库的作品与目录…"
+        self.catalogStatus = "正在分析资料库…"
+        let libraryRoot = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+        let roleOverrides = try database.catalogProfileOverrides(workspaceID: workspace.id)
+          .compactMapValues { $0.role }
+        let index = try LibraryWorkIndexer().index(root: libraryRoot,
+          roleOverrides: roleOverrides)
+        self.libraryIndex = index
+        let catalog = try await CatalogAnalysisService(database: database).analyze(
+          index: index, workspaceID: workspace.id, root: libraryRoot,
+          progress: { [weak self] completed, total in
+            await self?.setProgress(OrganizationProgress(phase: .analyzing,
+              completed: completed, total: total, isCancellable: true), sessionID: session.id)
+          })
+        try Task.checkCancellation()
+        self.catalog = catalog
+        self.catalogNeedsRefresh = false
+        self.catalogStatus = "已分析 \(catalog.profiles.count) 个分类、\(catalog.workAnalyses.count) 部作品；复用 \(catalog.reusedWorkCount) 部缓存"
+        self.creatorIdentities = try database.creatorIdentities(workspaceID: workspace.id)
+        let indexed = try DestinationCatalogService().index(workspace: workspace,
+          maxDepth: 4, roleOverrides: roleOverrides)
         let learning = LearningService(database: database)
         try learning.refreshExistingLibrarySamples(
           libraryID: workspace.id,
@@ -391,6 +729,8 @@ final class AppModel: ObservableObject {
         }
         self.updateSession(.proposing)
         self.statusMessage = "正在生成整理方案…"
+        let creatorResolutions = try self.creatorResolutions(
+          for: scanned, workspace: workspace, database: database)
         let result = await ClassificationPipeline().run(
           sessionID: session.id,
           items: scanned,
@@ -398,6 +738,8 @@ final class AppModel: ObservableObject {
           rules: self.rules,
           concepts: self.concepts,
           recognitionByItem: recognitions,
+          catalog: catalog,
+          creatorResolutions: creatorResolutions,
           progress: { [weak self] value in
             guard !Task.isCancelled else { return }
             await self?.setProgress(value, sessionID: session.id)
@@ -474,6 +816,8 @@ final class AppModel: ObservableObject {
       let old = proposals[index].destinationID
       proposals[index].destinationID = destinationID
       proposals[index].suggestedFolderName = nil
+      proposals[index].creatorDestinationPath = nil
+      proposals[index].creatorID = nil
       proposals[index].action = .move
       proposals[index].reviewDecision = .ready
       proposals[index].status = .overridden
@@ -502,6 +846,8 @@ final class AppModel: ObservableObject {
       proposals[index].action = .keep
       proposals[index].destinationID = nil
       proposals[index].suggestedFolderName = nil
+      proposals[index].creatorDestinationPath = nil
+      proposals[index].creatorID = nil
       proposals[index].reviewDecision = .keep
       proposals[index].status = .overridden
       proposals[index].source = .user
@@ -536,6 +882,8 @@ final class AppModel: ObservableObject {
       for proposalIndex in proposals.indices
       where affected.contains(proposals[proposalIndex].itemID) {
         proposals[proposalIndex].action = .keep
+        proposals[proposalIndex].creatorDestinationPath = nil
+        proposals[proposalIndex].creatorID = nil
         proposals[proposalIndex].reviewDecision = .needsReview
         proposals[proposalIndex].reason = "新目录建议已拒绝，请另选目标或保留"
       }
@@ -585,6 +933,8 @@ final class AppModel: ObservableObject {
         proposals[index].action = .suggestFolder
         proposals[index].destinationID = nil
         proposals[index].suggestedFolderName = name
+        proposals[index].creatorDestinationPath = nil
+        proposals[index].creatorID = nil
         proposals[index].source = .user
         proposals[index].reviewDecision = .ready
         proposals[index].status = .overridden
@@ -609,7 +959,8 @@ final class AppModel: ObservableObject {
   }
 
   func prepareExecution() async -> Bool {
-    guard let workspace, let session, let database, !isWorking, !isTeachingConcept else {
+    guard let workspace, let session, let database, !isWorking,
+      !isTeachingConcept, !catalogNeedsRefresh else {
       return false
     }
     currentPlan = nil
@@ -633,6 +984,8 @@ final class AppModel: ObservableObject {
       let planProposals = proposals
       let planFolderProposals = folderProposals
       let planRenameProposals = renameProposals
+      let selectedSources = selectedSourceIDs
+      let revision = catalog?.revision
       let preparation = Task.detached(priority: .userInitiated) {
         try Task.checkCancellation()
         return try PlanBuilder().build(
@@ -642,7 +995,9 @@ final class AppModel: ObservableObject {
           destinations: planDestinations,
           proposals: planProposals,
           folderProposals: planFolderProposals,
-          renameProposals: planRenameProposals
+          renameProposals: planRenameProposals,
+          selectedSourceIDs: selectedSources,
+          catalogRevision: revision
         )
       }
       planPreparationTask = preparation
@@ -656,7 +1011,8 @@ final class AppModel: ObservableObject {
         total: plan.operations.count,
         isCancellable: false
       )
-      let report = await SafePlanExecutor(workspace: workspace, database: database).preflight(
+      let report = await SafePlanExecutor(workspace: workspace, database: database,
+        catalogRevision: revision).preflight(
         plan,
         progress: { [weak self] value in
           await self?.setProgress(value, sessionID: session.id)
@@ -704,7 +1060,8 @@ final class AppModel: ObservableObject {
       do {
         let access = try SecurityScopedBookmarks.resolve(workspace)
         defer { access.stop() }
-        let executor = SafePlanExecutor(workspace: workspace, database: database)
+        let executor = SafePlanExecutor(workspace: workspace, database: database,
+          catalogRevision: self.catalog?.revision)
         self.activeExecutor = executor
         var finalReceipt: ExecutionReceipt?
         for try await event in executor.execute(plan) {
@@ -729,6 +1086,14 @@ final class AppModel: ObservableObject {
         guard finalReceipt != nil else {
           throw OrganizerError.operationFailed("执行流提前结束，未收到最终回执")
         }
+        if let finalReceipt {
+          do {
+            try self.recordCompletedCreatorDestinations(plan: plan, receipt: finalReceipt,
+              workspace: workspace, database: database)
+          } catch {
+            self.lastError = "作品已移动，但作者目录关系未保存：" + error.localizedDescription
+          }
+        }
         let wasCancelled = finalReceipt?.wasCancelled == true
         let hasFailure =
           finalReceipt?.results.contains { $0.state == .failed || $0.state == .blocked } ?? false
@@ -751,6 +1116,44 @@ final class AppModel: ObservableObject {
         self.updateSession(.failed, finished: true, error: error.localizedDescription)
       }
     }
+  }
+
+  func recordCompletedCreatorDestinations(
+    plan: OrganizationPlan, receipt: ExecutionReceipt, workspace: Workspace,
+    database: AppDatabase
+  ) throws {
+    let completed = Set(receipt.results.filter { $0.state == .completed }.map(\.operationID))
+    let root = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    let creatorCatalog = CreatorCatalog(database: database)
+    for operation in plan.operations where operation.kind == .move
+      && completed.contains(operation.id) {
+      guard let itemID = operation.itemID,
+        let item = items.first(where: { $0.id == itemID }),
+        let proposal = proposals.first(where: { $0.itemID == itemID }),
+        let categoryID = proposal.destinationID,
+        let category = destinations.first(where: { $0.id == categoryID })
+      else { continue }
+      let folderURL = URL(fileURLWithPath: operation.destinationPath).deletingLastPathComponent()
+      let categoryURL = root.appendingPathComponent(category.relativePath, isDirectory: true)
+      guard folderURL.deletingLastPathComponent().standardizedFileURL == categoryURL.standardizedFileURL
+      else { continue }
+      let path = category.relativePath + "/" + folderURL.lastPathComponent
+      guard (try? PathSafety.safeDestination(library: root, relativePath: path)) != nil
+      else { continue }
+      let parsed = WorkNameParser().parse(item.name)
+      guard !parsed.hasMultipleAuthors, let author = parsed.authorNames.first else { continue }
+      let identity: CreatorIdentity
+      switch try creatorCatalog.resolve(parsed, workspaceID: workspace.id) {
+      case .confirmed(let existing): identity = existing
+      case .unknown:
+        identity = try creatorCatalog.create(workspaceID: workspace.id,
+          japaneseName: author, englishName: nil, circleName: parsed.circleName)
+      case .candidates, .ambiguous: continue
+      }
+      try creatorCatalog.bindDestination(path, for: identity.id,
+        categoryPath: category.relativePath)
+    }
+    creatorIdentities = try database.creatorIdentities(workspaceID: workspace.id)
   }
 
   func undo() {
@@ -1440,6 +1843,8 @@ final class AppModel: ObservableObject {
     folderProposals = []
     renameProposals = []
     selectedItemIDs = []
+    selectedSourceIDs = []
+    selectedExistingWorkPaths = []
     selectedItemID = nil
     recognitionByItem = [:]
     decisionLocks = []
@@ -1454,13 +1859,17 @@ final class AppModel: ObservableObject {
 
   private func loadWorkspaceArtifacts(_ workspace: Workspace, database: AppDatabase) {
     do {
-      let indexed = try DestinationCatalogService().index(workspace: workspace, maxDepth: 4)
+      let roleOverrides = try database.catalogProfileOverrides(workspaceID: workspace.id)
+        .compactMapValues { $0.role }
+      let indexed = try DestinationCatalogService().index(workspace: workspace,
+        maxDepth: 4, roleOverrides: roleOverrides)
       let learning = LearningService(database: database)
       try learning.refreshExistingLibrarySamples(
         libraryID: workspace.id,
         root: URL(fileURLWithPath: workspace.libraryPath, isDirectory: true),
         destinations: indexed)
       destinations = try learning.enrich(destinations: indexed, libraryID: workspace.id)
+      creatorIdentities = try database.creatorIdentities(workspaceID: workspace.id)
       let namingLearning = NamingLearningService(database: database)
       try namingLearning.refreshExistingLibrarySamples(
         workspaceID: workspace.id,

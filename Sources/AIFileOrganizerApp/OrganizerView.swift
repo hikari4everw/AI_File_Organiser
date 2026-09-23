@@ -1,4 +1,5 @@
 import AIFileOrganizerCore
+import AppKit
 import SwiftUI
 
 struct OrganizerView: View {
@@ -7,6 +8,11 @@ struct OrganizerView: View {
   @State private var showExecutionConfirmation = false
   @State private var showNewFolder = false
   @State private var newFolderName = ""
+  @State private var selectedCatalogPath: String?
+  @State private var catalogPurposeDraft = ""
+  @State private var selectedCreatorID: UUID?
+  @State private var creatorAliasDraft = ""
+  @State private var aliasSourceDraft = ""
 
   var body: some View {
     HSplitView {
@@ -30,6 +36,10 @@ struct OrganizerView: View {
           }
         case .rules:
           RulesView(model: model)
+        case .catalog:
+          catalogPanel
+        case .creators:
+          creatorsPanel
         case .concepts:
           ConceptsView(model: model)
         case .history:
@@ -199,7 +209,8 @@ struct OrganizerView: View {
         HStack {
           VStack(alignment: .leading) {
             Text(proposal.displayName).fontWeight(.medium)
-            Text("包含 \(proposal.relatedItemIDs.count) 个项目 · 资料库第一级")
+            Text("包含 \(proposal.relatedItemIDs.count) 个项目 · "
+              + (proposal.parentDestinationID.map { model.destinationName($0) } ?? "资料库第一级"))
               .font(.caption).foregroundStyle(.secondary)
           }
           Spacer()
@@ -228,6 +239,11 @@ struct OrganizerView: View {
           }
         }
       }
+      Menu("现有作者目录…") {
+        ForEach(model.existingCreatorPaths, id: \.self) { path in
+          Button(path) { model.setCreatorDestination(path, for: model.selectedItemIDs) }
+        }
+      }
       Button("新建目录…") { showNewFolder = true }
       Button("保留原处") { model.keep(model.selectedItemIDs) }
       Button("这些项目保留原名") { model.rejectRenames(for: model.selectedItemIDs) }
@@ -250,7 +266,21 @@ struct OrganizerView: View {
             LabeledContent("类型", value: item.contentType ?? item.fileExtension.uppercased())
             LabeledContent(
               "大小", value: ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))
-            LabeledContent("目标", value: model.destinationName(proposal.destinationID))
+            LabeledContent("目标", value: proposal.creatorDestinationPath
+              ?? model.destinationName(proposal.destinationID))
+            if let name = proposal.suggestedFolderName, proposal.action == .move {
+              LabeledContent("新作者目录", value: name)
+            }
+            if !proposal.topCandidates.isEmpty {
+              Text("候选目录").font(.headline)
+              ForEach(proposal.topCandidates, id: \.destinationID) { candidate in
+                Text("\(model.destinationName(candidate.destinationID)) · \(Int(candidate.score * 100)) 分")
+                  .font(.caption).foregroundStyle(.secondary)
+              }
+            }
+            ForEach(proposal.evidence, id: \.detail) { evidence in
+              Text("• " + evidence.detail).font(.caption).foregroundStyle(.secondary)
+            }
             if let recognition = model.recognitionByItem[item.id] {
               Divider()
               Text("文件概念").font(.headline)
@@ -355,6 +385,160 @@ struct OrganizerView: View {
     }
   }
 
+  private var catalogPanel: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 16) {
+        HStack {
+          Text("资料库画像").font(.title2.bold())
+          Spacer()
+          Button("分析或更新目录画像") { model.refreshCatalog() }
+            .disabled(model.isWorking)
+        }
+        Text(model.catalogStatus).foregroundStyle(.secondary)
+        HStack {
+          Text(model.conceptModelStatus).font(.caption).foregroundStyle(.secondary)
+          if !ConceptModelManager().isInstalled {
+            Button(model.isDownloadingConceptModel ? "正在下载…" : "下载可选图像模型") {
+              model.installConceptModel()
+            }.disabled(model.isDownloadingConceptModel)
+          }
+        }
+        if let index = model.libraryIndex {
+          DisclosureGroup("目录角色（可人工纠正）") {
+            LazyVStack(alignment: .leading, spacing: 8) {
+              ForEach(index.nodes.filter { $0.kind == .directory }, id: \.relativePath) { node in
+                HStack {
+                  Text(node.relativePath).lineLimit(1)
+                  Spacer()
+                  Text(node.role.rawValue).font(.caption).foregroundStyle(.secondary)
+                  Menu("纠正角色") {
+                    Button("分类") { model.setCatalogRole(.category, for: node.relativePath) }
+                    Button("作者") { model.setCatalogRole(.creator, for: node.relativePath) }
+                    Button("作品") { model.setCatalogRole(.work, for: node.relativePath) }
+                    Button("不确定") { model.setCatalogRole(.uncertain, for: node.relativePath) }
+                  }
+                }
+              }
+            }
+          }
+        }
+        if let catalog = model.catalog {
+          let analyzed = catalog.profiles.reduce(0) { $0 + $1.contentAnalyzedWorks }
+          let total = catalog.profiles.reduce(0) { $0 + $1.totalWorks }
+          let uncertain = model.libraryIndex?.nodes.filter { $0.role == .uncertain }.count ?? 0
+          Text("内容覆盖 \(analyzed) / \(total) 部 · 待确认目录 \(uncertain) 个 · 缓存复用 \(catalog.reusedWorkCount) 部")
+            .font(.subheadline)
+          ProgressView(value: Double(analyzed), total: Double(max(1, total)))
+          ForEach(catalog.profiles, id: \.relativePath) { profile in
+            Button {
+              selectedCatalogPath = profile.relativePath
+              catalogPurposeDraft = profile.userPurpose
+            } label: {
+              HStack {
+                Label(profile.relativePath, systemImage: "folder")
+                Spacer()
+                Text("\(profile.totalWorks) 部 · 已分析 \(profile.contentAnalyzedWorks) 部")
+                  .foregroundStyle(.secondary)
+              }
+            }.buttonStyle(.plain)
+              .padding(10)
+              .background(selectedCatalogPath == profile.relativePath
+                ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.06),
+                in: RoundedRectangle(cornerRadius: 8))
+          }
+          if let profile = catalog.profiles.first(where: { $0.relativePath == selectedCatalogPath }) {
+            Divider()
+            Text("目录用途：\(profile.relativePath)").font(.headline)
+            HStack {
+              TextField("例如：同人志", text: $catalogPurposeDraft)
+              Button("保存用途") {
+                model.setCatalogPurpose(catalogPurposeDraft, for: profile.relativePath)
+              }
+            }
+            Text("选择旧作后，只有勾选的作品会进入本次复核。误例可从画像中排除。")
+              .font(.caption).foregroundStyle(.secondary)
+            ForEach((model.libraryIndex?.nodes ?? []).filter {
+              $0.role == .work && $0.relativePath.hasPrefix(profile.relativePath + "/")
+            }, id: \.relativePath) { work in
+              HStack {
+                Toggle(work.relativePath, isOn: Binding(
+                  get: { model.selectedExistingWorkPaths.contains(work.relativePath) },
+                  set: { selected in
+                    if selected { model.selectedExistingWorkPaths.insert(work.relativePath) }
+                    else { model.selectedExistingWorkPaths.remove(work.relativePath) }
+                  }
+                ))
+                Spacer()
+                Button(profile.referenceWorkPaths.contains(work.relativePath) ? "取消参考" : "作为参考") {
+                  model.setCatalogReference(!profile.referenceWorkPaths.contains(work.relativePath),
+                    workPath: work.relativePath, categoryPath: profile.relativePath)
+                }
+                Button(profile.excludedWorkPaths.contains(work.relativePath) ? "恢复样本" : "排除误例") {
+                  model.setCatalogWorkExcluded(!profile.excludedWorkPaths.contains(work.relativePath),
+                    workPath: work.relativePath, categoryPath: profile.relativePath)
+                }
+              }
+            }
+            Button("将勾选旧作加入本次复核") { model.includeSelectedExistingWorks() }
+              .buttonStyle(.borderedProminent)
+              .disabled(model.selectedExistingWorkPaths.isEmpty || model.session == nil
+                || model.isWorking)
+          }
+        }
+      }
+      .padding(22)
+    }
+  }
+
+  private var creatorsPanel: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 14) {
+        Text("作者身份").font(.title2.bold())
+        Text("仅确认过的别名会参与作者匹配；搜索只在你点击后打开浏览器。")
+          .foregroundStyle(.secondary)
+        ForEach(model.creatorIdentities) { creator in
+          Button {
+            selectedCreatorID = creator.id
+            creatorAliasDraft = ""
+            aliasSourceDraft = ""
+          } label: {
+            HStack {
+              Text(creator.proposedDirectoryName)
+              Spacer()
+              Text(creator.preferredDestinations.values.sorted().first ?? "未绑定目录")
+                .foregroundStyle(.secondary)
+            }
+          }.buttonStyle(.plain)
+        }
+        if let creator = model.creatorIdentities.first(where: { $0.id == selectedCreatorID }) {
+          Divider()
+          Text(creator.proposedDirectoryName).font(.headline)
+          Button("搜索作者或社团") {
+            let query = [creator.japaneseName, creator.circleName].compactMap { $0 }
+              .joined(separator: " ")
+            var components = URLComponents(string: "https://www.google.com/search")
+            components?.queryItems = [URLQueryItem(name: "q", value: query)]
+            if let url = components?.url { NSWorkspace.shared.open(url) }
+          }
+          HStack {
+            TextField("确认的英文或日文别名", text: $creatorAliasDraft)
+            TextField("来源网址", text: $aliasSourceDraft)
+            Button("确认别名") {
+              model.confirmCreatorAlias(creatorAliasDraft, creatorID: creator.id,
+                sourceURL: aliasSourceDraft)
+              creatorAliasDraft = ""
+            }.disabled(creatorAliasDraft.trimmingCharacters(in: .whitespaces).isEmpty
+              || URL(string: aliasSourceDraft)?.scheme?.hasPrefix("http") != true)
+          }
+          ForEach(creator.aliasSources.keys.sorted(), id: \.self) { alias in
+            Text("\(alias) · \(creator.aliasSources[alias] ?? "")")
+              .font(.caption).foregroundStyle(.secondary)
+          }
+        }
+      }.padding(22)
+    }
+  }
+
   private var moveCount: Int {
     let folderItems = Set(
       model.folderProposals.filter { $0.status == .approved }.flatMap(\.relatedItemIDs))
@@ -381,13 +565,13 @@ struct OrganizerView: View {
 }
 
 private enum OrganizerPage: String, CaseIterable, Identifiable {
-  case plan, concepts, rules, history
+  case plan, catalog, creators, concepts, rules, history
   var id: String { rawValue }
   var title: String {
-    switch self { case .plan: "整理计划"; case .concepts: "文件概念"; case .rules: "我的规则"; case .history: "历史与撤销" }
+    switch self { case .plan: "整理计划"; case .catalog: "资料库画像"; case .creators: "作者身份"; case .concepts: "文件概念"; case .rules: "我的规则"; case .history: "历史与撤销" }
   }
   var icon: String {
-    switch self { case .plan: "rectangle.3.group"; case .concepts: "square.stack.3d.up"; case .rules: "text.badge.checkmark"; case .history: "clock.arrow.circlepath" }
+    switch self { case .plan: "rectangle.3.group"; case .catalog: "folder.badge.gearshape"; case .creators: "person.2"; case .concepts: "square.stack.3d.up"; case .rules: "text.badge.checkmark"; case .history: "clock.arrow.circlepath" }
   }
 }
 
@@ -464,7 +648,7 @@ private struct ProposalRow: View {
         } else {
           Text(item.name).lineLimit(1)
         }
-        Text("\(URL(fileURLWithPath: item.path).deletingLastPathComponent().lastPathComponent)  →  \(model.destinationName(proposal.destinationID))")
+        Text("\(URL(fileURLWithPath: item.path).deletingLastPathComponent().lastPathComponent)  →  \(proposal.creatorDestinationPath ?? model.destinationName(proposal.destinationID))")
           .font(.caption).foregroundStyle(.secondary).lineLimit(1)
       }
       Spacer()

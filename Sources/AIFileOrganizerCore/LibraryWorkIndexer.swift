@@ -31,23 +31,34 @@ public struct LibraryWorkIndexer: Sendable {
 
   public init() {}
 
-  public func index(root: URL) throws -> LibraryWorkIndex {
+  public func index(
+    root: URL, roleOverrides: [String: LibraryNodeRole] = [:]
+  ) throws -> LibraryWorkIndex {
     var nodes: [LibraryWorkNode] = []
-    try visit(root, relativePath: "", depth: 0, nodes: &nodes)
+    try visit(root, relativePath: "", depth: 0, roleOverrides: roleOverrides, nodes: &nodes)
     return LibraryWorkIndex(nodes: nodes.sorted { $0.relativePath < $1.relativePath })
   }
 
   @discardableResult
   private func visit(
-    _ directory: URL, relativePath: String, depth: Int, nodes: inout [LibraryWorkNode]
+    _ directory: URL, relativePath: String, depth: Int,
+    roleOverrides: [String: LibraryNodeRole], nodes: inout [LibraryWorkNode]
   ) throws -> LibraryNodeRole {
     let keys: Set<URLResourceKey> = [
       .isDirectoryKey, .isRegularFileKey, .isHiddenKey, .isSymbolicLinkKey, .isPackageKey,
     ]
-    let children = try FileManager.default.contentsOfDirectory(
-      at: directory, includingPropertiesForKeys: Array(keys),
-      options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
-    ).sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    let children: [URL]
+    do {
+      children = try FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: Array(keys),
+        options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+      ).sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    } catch {
+      guard depth > 0 else { throw error }
+      nodes.append(LibraryWorkNode(relativePath: relativePath, role: .uncertain,
+        kind: .directory))
+      return .uncertain
+    }
     var directories: [(URL, String)] = []
     var files: [(URL, String)] = []
     for child in children {
@@ -67,31 +78,53 @@ public struct LibraryWorkIndexer: Sendable {
       imageExtensions.contains($0.0.pathExtension.lowercased())
     }.count
     let role: LibraryNodeRole
-    if depth > 0, pageCount > 0, directories.isEmpty, pageCount == files.count {
+    let metadataExtensions: Set<String> = ["txt", "nfo", "json", "xml"]
+    let nonPages = files.filter { !imageExtensions.contains($0.0.pathExtension.lowercased()) }
+    if depth > 0, pageCount > 0, directories.isEmpty,
+      nonPages.allSatisfy({ metadataExtensions.contains($0.0.pathExtension.lowercased()) })
+    {
       role = .work
     } else {
       var childRoles: [LibraryNodeRole] = []
       for (child, path) in directories {
-        childRoles.append(try visit(child, relativePath: path, depth: depth + 1, nodes: &nodes))
+        childRoles.append(try visit(child, relativePath: path, depth: depth + 1,
+          roleOverrides: roleOverrides, nodes: &nodes))
       }
       for (file, path) in files where depth > 0 {
         if !imageExtensions.contains(file.pathExtension.lowercased()) {
           nodes.append(LibraryWorkNode(relativePath: path, role: .work, kind: .file))
         }
       }
-      if depth == 1 {
+      if depth > 0 && directories.isEmpty && files.isEmpty {
+        role = .uncertain
+      } else if depth == 1 {
         role = .category
+      } else if depth > 1, pageCount > 0, !directories.isEmpty {
+        role = .uncertain
       } else if depth > 1, !childRoles.isEmpty,
         childRoles.allSatisfy({ $0 == .work }), files.isEmpty
+      {
+        role = .creator
+      } else if depth > 1, directories.isEmpty,
+        files.allSatisfy({ ["pdf", "cbz", "zip", "rar", "7z", "epub"].contains(
+          $0.0.pathExtension.lowercased()) })
       {
         role = .creator
       } else {
         role = .category
       }
+      if depth > 1, pageCount > 0, !directories.isEmpty {
+        for index in nodes.indices
+        where nodes[index].relativePath.hasPrefix(relativePath + "/")
+          && roleOverrides[nodes[index].relativePath] == nil {
+          nodes[index].role = .uncertain
+        }
+      }
     }
     if depth > 0 {
-      nodes.append(LibraryWorkNode(relativePath: relativePath, role: role, kind: .directory))
+      nodes.append(LibraryWorkNode(relativePath: relativePath,
+        role: roleOverrides[relativePath] ?? role, kind: .directory))
     }
-    return role
+    return roleOverrides[relativePath] ?? role
   }
 }

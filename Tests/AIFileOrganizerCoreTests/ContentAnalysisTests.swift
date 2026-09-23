@@ -6,6 +6,20 @@ import Testing
 @testable import AIFileOrganizerCore
 
 @Suite struct ContentAnalysisTests {
+  @Test func catalogPDFModeReadsFiveDispersedPages() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let pdf = root.appendingPathComponent("catalog.pdf")
+    try makePDF(pages: (1...11).map { "PAGE \($0)" }, at: pdf)
+    let item = ItemSnapshot(sessionID: UUID(), path: pdf.path,
+      name: pdf.lastPathComponent, kind: .file,
+      contentType: "com.adobe.pdf", fileExtension: "pdf")
+    let result = await NativeContentExtractor(maximumPDFPages: 5).extractContext(for: item)
+    #expect(result.text.contains("PAGE 1"))
+    #expect(result.text.contains("PAGE 6"))
+    #expect(result.text.contains("PAGE 11"))
+    #expect(!result.text.contains("PAGE 2\n"))
+  }
   @Test func extractsTextFromFirstThreePDFPagesOnly() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

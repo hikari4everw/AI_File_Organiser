@@ -45,18 +45,25 @@ public struct DeterministicClassifier: Sendable {
 
   public func rank(
     _ item: ItemContext, destinations: [DestinationProfile],
-    catalog: CatalogAnalysisResult? = nil
+    catalog: CatalogAnalysisResult? = nil, visualVector: [Float] = []
   ) -> [RankedCandidate] {
     let category = category(for: item.snapshot)
     let itemTokens = Set(item.normalizedKeywords)
     let parsed = WorkNameParser().parse(item.snapshot.name)
-    let profileByPath = Dictionary(uniqueKeysWithValues: (catalog?.profiles ?? []).map {
+    let profiles = catalog?.profiles ?? []
+    func ownsWork(_ path: String, profile: CatalogProfile) -> Bool {
+      profiles.filter { path.hasPrefix($0.relativePath + "/") }
+        .max { $0.relativePath.count < $1.relativePath.count }?.relativePath
+        == profile.relativePath
+    }
+    let profileByPath = Dictionary(uniqueKeysWithValues: profiles.map {
       ($0.relativePath, $0)
     })
     let extractedTokens = Set(KeywordTokenizer.tokens(from: item.extracted.text))
-    let textTokensByPath = Dictionary(uniqueKeysWithValues: (catalog?.profiles ?? []).map { profile in
+    let textTokensByPath = Dictionary(uniqueKeysWithValues: profiles.map { profile in
       (profile.relativePath, Set((catalog?.workAnalyses ?? [])
-        .filter { $0.relativePath.hasPrefix(profile.relativePath + "/") }
+        .filter { ownsWork($0.relativePath, profile: profile)
+          && !profile.excludedWorkPaths.contains($0.relativePath) }
         .flatMap { KeywordTokenizer.tokens(from: $0.extractedText) }))
     })
     let documentFrequency = textTokensByPath.values.reduce(into: [String: Int]()) { counts, tokens in
@@ -93,6 +100,7 @@ public struct DeterministicClassifier: Sendable {
           $0.circleName != nil && !$0.authorNames.isEmpty
         }
         if parsed.circleName != nil, !parsed.authorNames.isEmpty,
+          hasDoujinNameSignal(parsed),
           matchingShape.count * 2 >= max(1, examples.count)
         {
           let value = matchingShape.count >= 2 ? 1.05 : 0.75
@@ -111,7 +119,7 @@ public struct DeterministicClassifier: Sendable {
         let rareOverlap = extractedTokens.intersection(textTokensByPath[profile.relativePath] ?? [])
           .filter { documentFrequency[$0] == 1 && $0.count >= 3 }
         if !rareOverlap.isEmpty {
-          let value = min(0.5, Double(rareOverlap.count) * 0.16)
+          let value = min(1.2, Double(rareOverlap.count) * 0.2)
           score += value
           evidence.append(Evidence(kind: "content-text",
             detail: "正文与目录样本有特征词：" + rareOverlap.sorted().prefix(3).joined(separator: "、"),
@@ -121,6 +129,27 @@ public struct DeterministicClassifier: Sendable {
         if !purposeOverlap.isEmpty {
           score += 0.4
           evidence.append(Evidence(kind: "purpose", detail: "符合人工标注的目录用途", weight: 0.4))
+        }
+        if !visualVector.isEmpty {
+          let similarities = (catalog?.workAnalyses ?? []).filter {
+            ownsWork($0.relativePath, profile: profile)
+              && !profile.excludedWorkPaths.contains($0.relativePath)
+          }.compactMap { analysis -> (Double, Bool)? in
+            guard analysis.visualVector.count == visualVector.count else { return nil }
+            let dot = zip(visualVector, analysis.visualVector).reduce(0.0) {
+              $0 + Double($1.0) * Double($1.1)
+            }
+            let left = sqrt(visualVector.reduce(0.0) { $0 + Double($1) * Double($1) })
+            let right = sqrt(analysis.visualVector.reduce(0.0) { $0 + Double($1) * Double($1) })
+            guard left > 0, right > 0 else { return nil }
+            return (dot / (left * right), profile.referenceWorkPaths.contains(analysis.relativePath))
+          }
+          if let best = similarities.max(by: { $0.0 < $1.0 }), best.0 >= 0.82 {
+            let value = min(0.35, (best.0 - 0.75) * (best.1 ? 1.8 : 1.4))
+            score += value
+            evidence.append(Evidence(kind: "visual",
+              detail: "画面与目录代表作品相似", weight: value))
+          }
         }
       }
       guard score > 0 else { return nil }
@@ -173,6 +202,20 @@ public struct DeterministicClassifier: Sendable {
       return "document"
     }
     return nil
+  }
+
+  private func hasDoujinNameSignal(_ parsed: ParsedWorkName) -> Bool {
+    let header = ([parsed.circleName].compactMap { $0 } + parsed.authorNames).joined()
+    let hasKana = header.unicodeScalars.contains {
+      (0x3040...0x30FF).contains($0.value)
+    }
+    let hasHan = header.unicodeScalars.contains {
+      (0x3400...0x9FFF).contains($0.value)
+    }
+    let editionTags = ["DL版", "中国翻訳", "中國翻譯", "汉化", "漢化", "同人"]
+    return hasKana || hasHan || parsed.tags.contains { tag in
+      editionTags.contains { tag.localizedCaseInsensitiveContains($0) }
+    }
   }
 
   private func sameTypeFamily(_ lhs: String, _ rhs: String) -> Bool {

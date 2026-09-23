@@ -81,6 +81,10 @@ public struct ClassificationPipeline: Sendable {
     var contextsByItem: [UUID: ItemContext] = [:]
     let validDestinationIDs = Set(destinations.filter { $0.kind == .category }.map(\.id))
     let ruleEngine = RuleEngine()
+    let featureExtractor: ConceptFeatureExtractor? =
+      catalog?.workAnalyses.contains(where: { !$0.visualVector.isEmpty }) == true
+      ? (try? ConceptModelManager().provider()).map(ConceptFeatureExtractor.init(provider:))
+      : nil
 
     if !Task.isCancelled {
       await progress(
@@ -125,7 +129,7 @@ public struct ClassificationPipeline: Sendable {
       }
       let candidates = classifier.rank(basic, destinations: destinations, catalog: catalog)
       candidatesByItem[item.id] = candidates
-      if recognition?.status == .unknown || recognition == nil,
+      if (recognition?.status == .unknown || recognition == nil) && !(catalog != nil && item.kind == .file),
         let proposal = classifier.proposal(
         sessionID: sessionID, item: basic, candidates: candidates),
         proposal.reviewDecision == .ready
@@ -203,7 +207,9 @@ public struct ClassificationPipeline: Sendable {
             }
           }
         }
-        let reranked = classifier.rank(enriched, destinations: destinations, catalog: catalog)
+        let visualVector = (try? await featureExtractor?.extract(item: item))?.visualVector ?? []
+        let reranked = classifier.rank(enriched, destinations: destinations, catalog: catalog,
+          visualVector: visualVector)
         candidatesByItem[item.id] = reranked
         ambiguous.append(enriched)
       }
@@ -309,7 +315,8 @@ public struct ClassificationPipeline: Sendable {
       guard var proposal = final[item.id] else { return nil }
       proposal.topCandidates = Array((candidatesByItem[item.id] ?? []).prefix(3))
       proposal.catalogRevision = catalog?.revision
-      guard proposal.action == .move, proposal.source != .user,
+      guard proposal.action == .move,
+        !((proposal.status == .overridden || proposal.status == .approved) && proposal.source == .user),
         let destinationID = proposal.destinationID,
         let category = destinationsByID[destinationID]
       else { return proposal }

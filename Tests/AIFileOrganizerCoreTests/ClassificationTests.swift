@@ -7,6 +7,13 @@ private struct EmptyExtractor: ContentExtractor {
   func extractContext(for item: ItemSnapshot) async -> ExtractedContext { .init() }
 }
 
+private struct FixedTextExtractor: ContentExtractor {
+  let text: String
+  func extractContext(for item: ItemSnapshot) async -> ExtractedContext {
+    ExtractedContext(text: text, source: "test", status: .success)
+  }
+}
+
 private struct MockProvider: ClassificationProvider {
   let result: [ModelProposal]
   var availabilityDescription: String { "测试模型可用" }
@@ -32,6 +39,93 @@ private actor ProgressRecorder {
 }
 
 @Suite struct ClassificationTests {
+  @Test func matchingRuleStillUsesConfirmedCreatorDirectory() async {
+    let session = UUID()
+    let item = ItemSnapshot(sessionID: session, path: "/tmp/work",
+      name: "[青空 (作者甲)] 新作", kind: .directory)
+    let category = DestinationProfile(relativePath: "bunga", displayName: "bunga")
+    let creator = CreatorIdentity(workspaceID: UUID(), japaneseName: "作者甲",
+      englishName: nil, circleName: "青空",
+      preferredDestinations: ["bunga": "bunga/[青空] 作者甲"])
+    let rule = OrganizationRule(workspaceID: creator.workspaceID,
+      originalText: "青空作品放 bunga",
+      condition: RuleCondition(filenameKeywords: ["青空"]),
+      destinationID: category.id)
+    let result = await ClassificationPipeline(provider: UnavailableProvider()).run(
+      sessionID: session, items: [item], destinations: [category], rules: [rule],
+      creatorResolutions: [item.id: .confirmed(creator)])
+    #expect(result.proposals.first?.creatorDestinationPath == "bunga/[青空] 作者甲")
+    #expect(result.proposals.first?.source == .user)
+  }
+  @Test func genericPDFTypeCannotSkipStrongerCatalogContentEvidence() async {
+    let session = UUID()
+    let item = ItemSnapshot(sessionID: session, path: "/tmp/untitled.pdf",
+      name: "untitled.pdf", kind: .file,
+      contentType: "com.adobe.pdf", fileExtension: "pdf")
+    let generic = DestinationProfile(relativePath: "PDF", displayName: "PDF", keywords: ["pdf"])
+    let doujin = DestinationProfile(relativePath: "bunga", displayName: "bunga")
+    let distinctive = "kanji heroine circle gallery translation illustration"
+    let catalog = CatalogAnalysisResult(profiles: [
+      CatalogProfile(relativePath: "PDF", workNames: ["report.pdf"], nameFrequencies: [:],
+        totalWorks: 1, contentAnalyzedWorks: 0, userPurpose: "", referenceWorkPaths: []),
+      CatalogProfile(relativePath: "bunga", workNames: ["old-work.pdf"], nameFrequencies: [:],
+        totalWorks: 1, contentAnalyzedWorks: 1, userPurpose: "", referenceWorkPaths: []),
+    ], workAnalyses: [CatalogWorkAnalysis(relativePath: "bunga/old-work.pdf",
+      fingerprint: "sample", representativePaths: [], extractedText: distinctive,
+      contentStatus: .success)], reusedWorkCount: 0, revision: "text-r1")
+    let result = await ClassificationPipeline(extractor: FixedTextExtractor(text: distinctive),
+      provider: UnavailableProvider()).run(sessionID: session, items: [item],
+        destinations: [generic, doujin], catalog: catalog)
+    #expect(result.proposals.first?.destinationID == doujin.id)
+    #expect(result.proposals.first?.topCandidates.first?.destinationID == doujin.id)
+    #expect(result.proposals.first?.evidence.contains { $0.kind == "content-text" } == true)
+  }
+  @Test func nestedCategoryTextEvidenceBelongsOnlyToNearestCategory() {
+    let item = ItemSnapshot(sessionID: UUID(), path: "/tmp/new.txt",
+      name: "new.txt", kind: .file)
+    let parent = DestinationProfile(relativePath: "Media", displayName: "Media")
+    let child = DestinationProfile(relativePath: "Media/Comics", displayName: "Comics")
+    let catalog = CatalogAnalysisResult(profiles: [
+      CatalogProfile(relativePath: "Media", workNames: [], nameFrequencies: [:],
+        totalWorks: 0, contentAnalyzedWorks: 0, userPurpose: "", referenceWorkPaths: []),
+      CatalogProfile(relativePath: "Media/Comics", workNames: ["Work"], nameFrequencies: [:],
+        totalWorks: 1, contentAnalyzedWorks: 1, userPurpose: "", referenceWorkPaths: []),
+    ], workAnalyses: [CatalogWorkAnalysis(relativePath: "Media/Comics/Work",
+      fingerprint: "one", representativePaths: [], extractedText: "uniquecomicword",
+      contentStatus: .success)], reusedWorkCount: 0, revision: "nested")
+    let context = DeterministicClassifier().context(for: item,
+      extracted: ExtractedContext(text: "uniquecomicword", source: "test", status: .success))
+    let ranked = DeterministicClassifier().rank(context,
+      destinations: [parent, child], catalog: catalog)
+    #expect(ranked.first?.destinationID == child.id)
+    #expect(!ranked.contains { $0.destinationID == parent.id
+      && $0.evidence.contains { $0.kind == "content-text" } })
+  }
+  @Test func optionalVisualSampleAddsCitedEvidenceWithoutImageModelRequirement() {
+    let session = UUID()
+    let item = ItemSnapshot(sessionID: session, path: "/tmp/image.jpg",
+      name: "image.jpg", kind: .file, fileExtension: "jpg")
+    let a = DestinationProfile(relativePath: "A", displayName: "A")
+    let b = DestinationProfile(relativePath: "B", displayName: "B")
+    let catalog = CatalogAnalysisResult(profiles: [
+      CatalogProfile(relativePath: "A", workNames: [], nameFrequencies: [:],
+        totalWorks: 1, contentAnalyzedWorks: 1, userPurpose: "", referenceWorkPaths: []),
+      CatalogProfile(relativePath: "B", workNames: [], nameFrequencies: [:],
+        totalWorks: 1, contentAnalyzedWorks: 1, userPurpose: "", referenceWorkPaths: []),
+    ], workAnalyses: [
+      CatalogWorkAnalysis(relativePath: "A/old.jpg", fingerprint: "a",
+        representativePaths: [], extractedText: "", contentStatus: .noText,
+        visualVector: [0, 1]),
+      CatalogWorkAnalysis(relativePath: "B/old.jpg", fingerprint: "b",
+        representativePaths: [], extractedText: "", contentStatus: .noText,
+        visualVector: [1, 0]),
+    ], reusedWorkCount: 0, revision: "visual")
+    let ranked = DeterministicClassifier().rank(
+      DeterministicClassifier().context(for: item), destinations: [a, b],
+      catalog: catalog, visualVector: [1, 0])
+    #expect(ranked.first?.destinationID == b.id)
+    #expect(ranked.first?.evidence.contains { $0.kind == "visual" } == true)
+  }
   @Test func learnedDoujinshiPatternOutranksGenericPDFFolder() async {
     let session = UUID()
     let item = ItemSnapshot(sessionID: session, path: "/tmp/work.pdf",

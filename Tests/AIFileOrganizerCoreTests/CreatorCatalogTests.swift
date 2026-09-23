@@ -68,5 +68,20 @@ import Testing
     let result = try catalog.resolve(
       WorkNameParser().parse("[社团 (作者甲 & 作者乙)] 合集"), workspaceID: workspaceID)
     #expect(result == .ambiguous)
+    let slash = WorkNameParser().parse("[社团 (作者甲 / 作者乙)] 合集")
+    #expect(slash.hasMultipleAuthors)
+    #expect(try catalog.resolve(slash, workspaceID: workspaceID) == .ambiguous)
+  }
+
+  @Test func confirmedEnglishAliasAppearsInProposedFolderName() throws {
+    let database = try AppDatabase.inMemory()
+    let catalog = CreatorCatalog(database: database)
+    let creator = try catalog.create(workspaceID: UUID(), japaneseName: "まめおじたん",
+      englishName: nil, circleName: "おじたん屋さん")
+    try catalog.confirmAlias("Mame Ojitan", for: creator.id,
+      sourceURL: "https://example.test/author")
+    let saved = try database.creatorIdentity(id: creator.id)
+    let updated = try #require(saved)
+    #expect(updated.proposedDirectoryName == "[おじたん屋さん] まめおじたん (Mame Ojitan)")
   }
 }

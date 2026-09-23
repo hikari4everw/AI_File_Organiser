@@ -4,6 +4,34 @@ import Testing
 @testable import AIFileOrganizerCore
 
 @Suite struct LibraryWorkIndexerTests {
+  @Test func mixedPagesAndBonusDirectoryAreNotClassifiedAsCategory() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let bonus = root.appendingPathComponent("bunga/作品/特典", isDirectory: true)
+    try FileManager.default.createDirectory(at: bonus, withIntermediateDirectories: true)
+    try Data([1]).write(to: root.appendingPathComponent("bunga/作品/001.jpg"))
+    try Data([2]).write(to: bonus.appendingPathComponent("bonus.jpg"))
+    let index = try LibraryWorkIndexer().index(root: root)
+    #expect(index.nodes.first { $0.relativePath == "bunga/作品" }?.role == .uncertain)
+    #expect(index.nodes.first { $0.relativePath == "bunga/作品/特典" }?.role == .uncertain)
+    #expect(!index.nodes.contains { $0.relativePath.hasPrefix("bunga/作品/")
+      && $0.role == .work })
+    let workspace = Workspace(inboxPath: "/tmp", libraryPath: root.path,
+      inboxVolumeID: "volume", libraryVolumeID: "volume")
+    let destinations = try DestinationIndexer().index(workspace: workspace, maxDepth: 4)
+    #expect(!destinations.contains { $0.relativePath == "bunga/作品" && $0.kind == .category })
+  }
+  @Test func uncertainDirectoryCanBeCorrectedToCategory() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appendingPathComponent("unknown", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let automatic = try LibraryWorkIndexer().index(root: root)
+    #expect(automatic.nodes.first?.role == .uncertain)
+    let corrected = try LibraryWorkIndexer().index(root: root,
+      roleOverrides: ["unknown": .category])
+    #expect(corrected.nodes.first?.role == .category)
+  }
   @Test func imageWorkIsOneUnitAndCreatorIsNotADestination() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let nestedWork = root.appendingPathComponent("bunga/作者/作品", isDirectory: true)

@@ -75,6 +75,10 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
         issues.append(.init(operationID: operation.id, message: message))
         continue
       }
+      if operation.kind != .rename && hasSymbolicLinkComponent(destination, under: library) {
+        issues.append(.init(operationID: operation.id, message: "目标目录不能经过符号链接"))
+        continue
+      }
       if !destinations.insert(PathSafety.normalizedCollisionKey(destination)).inserted {
         issues.append(
           .init(operationID: operation.id, message: "计划内存在重复目标：\(destination.lastPathComponent)"))

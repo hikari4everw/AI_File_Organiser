@@ -7,10 +7,15 @@ import Vision
 public actor NativeContentExtractor: ContentExtractor {
   public let maximumCharacters: Int
   public let maximumBytes: Int
+  public let maximumPDFPages: Int
 
-  public init(maximumCharacters: Int = 4_000, maximumBytes: Int = 1_048_576) {
+  public init(
+    maximumCharacters: Int = 4_000, maximumBytes: Int = 1_048_576,
+    maximumPDFPages: Int = 3
+  ) {
     self.maximumCharacters = maximumCharacters
     self.maximumBytes = maximumBytes
+    self.maximumPDFPages = max(1, maximumPDFPages)
   }
 
   public func extractContext(for item: ItemSnapshot) async -> ExtractedContext {
@@ -45,26 +50,33 @@ public actor NativeContentExtractor: ContentExtractor {
     guard let document = PDFDocument(url: url), document.pageCount > 0 else {
       return .init(source: "unreadable-pdf", status: .unreadable)
     }
-    let pageLimit = min(document.pageCount, 3)
-    let text = (0..<pageLimit).compactMap { document.page(at: $0)?.string }
+    let pageIndices = maximumPDFPages >= 5
+      ? ConceptFeatureExtractor.representativePositions(count: document.pageCount)
+      : Array(0..<min(document.pageCount, maximumPDFPages))
+    let text = pageIndices.compactMap { document.page(at: $0)?.string }
       .joined(separator: "\n")
       .trimmingCharacters(in: .whitespacesAndNewlines)
     if !text.isEmpty {
       return clipped(
         text,
-        source: "pdf-pages-1-\(pageLimit)",
-        inputWasLimited: document.pageCount > pageLimit
+        source: maximumPDFPages >= 5 ? "pdf-dispersed-pages" : "pdf-first-pages",
+        inputWasLimited: document.pageCount > pageIndices.count
       )
     }
-    guard let page = document.page(at: 0) else {
-      return .init(source: "pdf-no-text", status: .noText)
+    var recognized: [String] = []
+    for index in pageIndices {
+      guard let page = document.page(at: index) else { continue }
+      let image = page.thumbnail(of: NSSize(width: 1600, height: 1600), for: .mediaBox)
+      var rectangle = NSRect(origin: .zero, size: image.size)
+      guard let cgImage = image.cgImage(forProposedRect: &rectangle, context: nil, hints: nil)
+      else { continue }
+      let result = recognize(cgImage, source: "pdf-ocr")
+      if result.status == .success { recognized.append(result.text) }
     }
-    let image = page.thumbnail(of: NSSize(width: 1600, height: 1600), for: .mediaBox)
-    var rectangle = NSRect(origin: .zero, size: image.size)
-    guard let cgImage = image.cgImage(forProposedRect: &rectangle, context: nil, hints: nil) else {
-      return .init(source: "pdf-no-text", status: .noText)
-    }
-    return recognize(cgImage, source: "pdf-first-page-ocr")
+    return recognized.isEmpty
+      ? .init(source: "pdf-no-text", status: .noText)
+      : clipped(recognized.joined(separator: "\n"), source: "pdf-sampled-ocr",
+        inputWasLimited: document.pageCount > pageIndices.count)
   }
 
   private func extractImageText(_ url: URL) -> ExtractedContext {

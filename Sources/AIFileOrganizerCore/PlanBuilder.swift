@@ -95,6 +95,15 @@ public struct PlanBuilder: Sendable {
       }
       let directory = try PathSafety.safeDestination(
         library: library, relativePath: relativePath)
+      let finalName: String
+      if let baseName = renamesByItem[item.id]?.selectedBaseName {
+        finalName = try FilenameValidator().validatedFullName(baseName: baseName, item: item)
+      } else {
+        finalName = item.name
+      }
+      if PathSafety.normalized(URL(fileURLWithPath: item.path))
+        == PathSafety.normalized(directory.appendingPathComponent(finalName))
+      { continue }
       operations.append(
         try moveOperation(
           item: item,
@@ -110,6 +119,7 @@ public struct PlanBuilder: Sendable {
     }
 
     for item in items where !handledItems.contains(item.id) {
+      guard PathSafety.isDirectChild(URL(fileURLWithPath: item.path), of: inbox) else { continue }
       guard sourceAllowed(item, inbox: inbox, library: library,
         selectedSourceIDs: selectedSourceIDs) else { continue }
       guard let rename = renamesByItem[item.id], let baseName = rename.selectedBaseName else {

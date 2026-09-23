@@ -8,12 +8,14 @@ public struct DestinationCatalogService: Sendable {
   public func index(
     workspace: Workspace,
     maxDepth: Int = 4,
-    kindsByRelativePath: [String: DestinationKind] = [:]
+    kindsByRelativePath: [String: DestinationKind] = [:],
+    roleOverrides: [String: LibraryNodeRole] = [:]
   ) throws -> [DestinationProfile] {
     try indexer.index(
       workspace: workspace,
       maxDepth: maxDepth,
-      kindsByRelativePath: kindsByRelativePath
+      kindsByRelativePath: kindsByRelativePath,
+      roleOverrides: roleOverrides
     )
   }
 }

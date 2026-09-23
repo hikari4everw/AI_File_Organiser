@@ -1092,6 +1092,21 @@ public final class AppDatabase: @unchecked Sendable {
     }
   }
 
+  public func catalogProfileOverrides(workspaceID: UUID) throws
+    -> [String: CatalogProfileOverride]
+  {
+    try queue.read { db in
+      let rows = try Row.fetchAll(db,
+        sql: "SELECT relative_path, payload_json FROM catalog_profile_overrides WHERE workspace_id = ?",
+        arguments: [workspaceID.uuidString])
+      return try Dictionary(uniqueKeysWithValues: rows.map { row in
+        let path: String = row["relative_path"]
+        let payload: Data = row["payload_json"]
+        return (path, try decode(CatalogProfileOverride.self, from: payload))
+      })
+    }
+  }
+
   public func creatorIdentities(workspaceID: UUID) throws -> [CreatorIdentity] {
     try queue.read { db in
       try Data.fetchAll(db,

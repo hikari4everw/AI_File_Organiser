@@ -68,6 +68,11 @@ public struct CreatorCatalog: Sendable {
     let name = alias.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !name.isEmpty else { throw OrganizerError.invalidFolderName("作者别名不能为空") }
     creator.aliasSources[name] = sourceURL
+    if creator.englishName == nil,
+      name.unicodeScalars.contains(where: { CharacterSet.letters.contains($0) }),
+      name.unicodeScalars.allSatisfy({ $0.value < 0x0250 }) {
+      creator.englishName = name
+    }
     try database.saveCreatorIdentity(creator)
   }
 

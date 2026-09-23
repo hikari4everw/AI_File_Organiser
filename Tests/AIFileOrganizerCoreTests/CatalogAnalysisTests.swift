@@ -3,7 +3,40 @@ import Testing
 
 @testable import AIFileOrganizerCore
 
+private actor CatalogProgressRecorder {
+  var values: [Int] = []
+  func record(_ completed: Int) { values.append(completed) }
+}
+
 @Suite struct CatalogAnalysisTests {
+  @Test func analysisReportsCompletedWorksIncludingCachedOnes() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    for number in 1...2 {
+      let work = root.appendingPathComponent("bunga/Work\(number)", isDirectory: true)
+      try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+      try Data([0]).write(to: work.appendingPathComponent("001.jpg"))
+    }
+    let recorder = CatalogProgressRecorder()
+    let service = CatalogAnalysisService(database: try .inMemory())
+    let index = try LibraryWorkIndexer().index(root: root)
+    _ = try await service.analyze(index: index, workspaceID: UUID(), root: root,
+      progress: { completed, _ in await recorder.record(completed) })
+    #expect(await recorder.values == [0, 1, 2])
+  }
+  @Test func nestedCategoryOwnsItsWorksWithoutDuplicatingParentProfile() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let nested = root.appendingPathComponent("Media/Comics/Work", isDirectory: true)
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    try Data([0]).write(to: nested.appendingPathComponent("001.jpg"))
+    let index = try LibraryWorkIndexer().index(root: root,
+      roleOverrides: ["Media/Comics": .category])
+    let catalog = try await CatalogAnalysisService(database: .inMemory()).analyze(
+      index: index, workspaceID: UUID(), root: root)
+    #expect(catalog.profiles.first { $0.relativePath == "Media" }?.totalWorks == 0)
+    #expect(catalog.profiles.first { $0.relativePath == "Media/Comics" }?.totalWorks == 1)
+  }
   @Test func profilesEveryWorkNameAndReusesCachedResults() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let category = root.appendingPathComponent("bunga", isDirectory: true)

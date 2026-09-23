@@ -4,6 +4,19 @@ import Testing
 @testable import AIFileOrganizerCore
 
 @Suite struct PathSafetyTests {
+  @Test func symlinkToAnotherCategoryInsideLibraryCannotRedirectCreatorFolder() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let bunga = root.appendingPathComponent("bunga", isDirectory: true)
+    let other = root.appendingPathComponent("Other/作者", isDirectory: true)
+    try FileManager.default.createDirectory(at: bunga, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(
+      at: bunga.appendingPathComponent("作者"), withDestinationURL: other)
+    #expect(throws: (any Error).self) {
+      try PathSafety.safeDestination(library: root, relativePath: "bunga/作者")
+    }
+  }
   @Test func rejectsOverlappingWorkspace() throws {
     let root = try temporaryDirectory()
     let child = root.appendingPathComponent("child", isDirectory: true)
@@ -67,7 +80,7 @@ import Testing
       Issue.record("期望 invalidWorkspace，实际为 \(String(describing: thrown))")
       return
     }
-    #expect(message.contains("超出资料库范围"))
+    #expect(message.contains("符号链接"))
   }
 
   /// 指向收件箱外的符号链接不能被当作收件箱直接子项——否则计划里就会出现
