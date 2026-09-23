@@ -389,4 +389,86 @@ private actor ProgressRecorder {
     #expect(result.count == 1)
     #expect(result.first?.relatedItemIDs.count == 2)
   }
+
+  /// 回归：叠加命名结构、同作者、正文特征词、用途和画面证据后，证据总分是 2.3，
+  /// 界面曾按 score * 100 展示成“230 分”。展示必须走归一化后的 normalizedScore；
+  /// 同时锁定 score 保持原始证据总分，不能被截断（截断会让强证据与通用类型证据同分）。
+  @Test func displayScoreStaysNormalizedWhileRawEvidenceTotalIsPreserved() {
+    let session = UUID()
+    let doujin = DestinationProfile(relativePath: "bunga", displayName: "bunga")
+    let item = ItemSnapshot(
+      sessionID: session, path: "/tmp/x.pdf", name: "[青空 (作者甲)] 新作 [DL版].pdf",
+      kind: .file, contentType: "com.adobe.pdf", fileExtension: "pdf")
+    let catalog = CatalogAnalysisResult(
+      profiles: [
+        CatalogProfile(
+          relativePath: "bunga",
+          workNames: ["[青空 (作者甲)] 旧作1", "[青空 (作者甲)] 旧作2"],
+          nameFrequencies: [:], totalWorks: 2, contentAnalyzedWorks: 2,
+          userPurpose: "同人志", referenceWorkPaths: [])
+      ],
+      workAnalyses: [
+        CatalogWorkAnalysis(
+          relativePath: "bunga/旧作1", fingerprint: "f", representativePaths: [],
+          extractedText: "distinctive rarewords here", contentStatus: .success,
+          visualVector: [1, 0, 0])
+      ],
+      reusedWorkCount: 0, revision: "r")
+    let context = DeterministicClassifier().context(
+      for: item,
+      extracted: ExtractedContext(
+        text: "distinctive rarewords here", source: "test", status: .success))
+    let ranked = DeterministicClassifier().rank(
+      context, destinations: [doujin], catalog: catalog, visualVector: [1, 0, 0])
+
+    #expect(!ranked.isEmpty)
+    // 展示值必须落在 0...1，界面不会出现超过 100 分。
+    #expect(ranked.allSatisfy { (0...1).contains($0.normalizedScore) })
+    #expect(ranked.first?.normalizedScore == 1)
+    // 原始证据总分保留全部强度，供排序和门槛使用。
+    #expect((ranked.first?.score ?? 0) > 1)
+    // 证据本身不能被丢弃，否则界面无法解释依据。
+    let kinds = Set((ranked.first?.evidence ?? []).map(\.kind))
+    #expect(kinds.isSuperset(of: ["name-pattern", "creator-example", "content-text", "visual"]))
+  }
+
+  /// 回归：目录“已有同一作者”的强身份证据曾被“命名形态样本数 ≥2”的 0.30 台阶
+  /// 正好抵消，两边同为 1.05，首选目录退化成按 UUID 排序，正确目录不再是首选。
+  @Test func directoryWithSameAuthorOutranksOneThatOnlyHasMoreShapedNames() {
+    let session = UUID()
+    let categoryA = DestinationProfile(relativePath: "A", displayName: "A")
+    let categoryB = DestinationProfile(relativePath: "B", displayName: "B")
+    let catalog = CatalogAnalysisResult(
+      profiles: [
+        CatalogProfile(
+          relativePath: "A",
+          workNames: ["[社1 (作者1)] 名1", "[社2 (作者2)] 名2", "[社3 (作者3)] 名3"],
+          nameFrequencies: [:], totalWorks: 3, contentAnalyzedWorks: 0,
+          userPurpose: "", referenceWorkPaths: []),
+        CatalogProfile(
+          relativePath: "B", workNames: ["[社9 (作者9)] 名9"],
+          nameFrequencies: [:], totalWorks: 1, contentAnalyzedWorks: 0,
+          userPurpose: "", referenceWorkPaths: []),
+      ],
+      workAnalyses: [], reusedWorkCount: 0, revision: "r")
+    let item = ItemSnapshot(
+      sessionID: session, path: "/tmp/w.pdf", name: "[社9 (作者9)] 全新作品 [DL版].pdf",
+      kind: .file, contentType: "com.adobe.pdf", fileExtension: "pdf")
+    let context = DeterministicClassifier().context(for: item)
+
+    // 打乱输入顺序不应改变结果：排序不能再依赖 UUID 或数组顺序。
+    let forward = DeterministicClassifier().rank(
+      context, destinations: [categoryA, categoryB], catalog: catalog)
+    let reversed = DeterministicClassifier().rank(
+      context, destinations: [categoryB, categoryA], catalog: catalog)
+
+    #expect(forward.first?.destinationID == categoryB.id)
+    #expect(reversed.first?.destinationID == categoryB.id)
+    #expect(forward.first?.evidence.contains { $0.kind == "creator-example" } == true)
+    // 封顶后同分意味着证据不足以自动接受，应交给人工审核。
+    let proposal = DeterministicClassifier().proposal(
+      sessionID: session, item: context, candidates: forward)
+    #expect(proposal?.destinationID == categoryB.id)
+    #expect(proposal?.reviewDecision == .needsReview)
+  }
 }

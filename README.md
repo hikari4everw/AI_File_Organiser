@@ -12,6 +12,7 @@
 - 同人志式 `[社团 (作者)] 标题 [版本]` 名称会与目标目录的真实作品结构比较；明确作者可建议归入已有作者目录，新作者目录必须审核。
 - 作者日文/英文别名只在人工确认后绑定；搜索作者或社团需要用户主动点击。
 - 可逐项勾选资料库旧作加入当前复核；未选择的旧作不会进入移动计划。
+- 独立的“整理已有作品”入口：新建只包含所选旧作的会话，不扫描收件箱、不改名作品、不改已有作者目录名、不合并且不删除原有目录；当前收件箱复核未处理完时会先确认再切换。
 - UTType、文件名、用户规则、已有资料库样本和目标目录画像共同驱动分类。
 - 新文件默认读取 PDF 前三页；资料库画像分散读取最多五页并在无文字时 OCR。另有有限文本、按需图片 OCR，以及目录两层/200 项摘要。
 - Apple Foundation Models guided generation；不可用时完整降级。
@@ -43,7 +44,8 @@ xcodebuild -project AIFileOrganizer.xcodeproj -scheme AIFileOrganizer test
 
 命令行打包脚本生成 ad-hoc 签名的本机 `.app`。Developer ID 签名、公证和正式分发需要付费 Apple Developer 账号，当前不在完成条件内。
 
-项目包含核心单元测试、UI 测试和 `AIFileOrganizerChecks` 安全检查。若本机 SwiftPM 的用户级缓存不可写（受限环境），需要显式指定可写的模块缓存并关闭沙箱：
+当前测试基线为 **262 个单元测试（31 个套件）**，另有 `AIFileOrganizerChecks` 的 11 项核心安全检查。
+若本机 SwiftPM 的用户级缓存不可写（受限环境），需要显式指定可写的模块缓存并关闭沙箱：
 
 ```bash
 CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" \
@@ -52,6 +54,21 @@ swift test --disable-sandbox
 ```
 
 概念特征提取用例默认跳过：它们需要本地已编译的 MobileCLIP 包，通过 `AI_FILE_ORGANIZER_TEST_MODEL` 指向该包路径才会执行。
+本机当前**没有安装**本地图像模型，因此所有视觉相关能力都处于“无模型”档。
+实际测试、检查、构建与 UI 测试状态记录在 `Docs/ACCEPTANCE.md`。
+
+### 验收评测
+
+分类准确率与批量接受率由独立验收集判定，不靠合成样本自证：
+
+```bash
+AI_FILE_ORGANIZER_ACCEPTANCE_LIBRARY=/path/to/library \
+  swift run --disable-sandbox AIFileOrganizerAcceptance Evaluation/acceptance/manifest.json
+```
+
+清单格式、门槛与退出码见 `Evaluation/acceptance/README.md`。
+仓库内仅有示例条目，评测工具遇到示例清单会以退出码 3 结束而**不会报告通过**；
+因此三条准确率门槛目前仍是**未验证**状态，详见 `Docs/ACCEPTANCE.md`。
 
 如果本机 Command Line Tools 的编译器与 macOS 26 SDK 不匹配，可临时用随附的 15.4 SDK 验证基础模式：
 

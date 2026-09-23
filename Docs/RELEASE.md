@@ -2,7 +2,18 @@
 
 ## 当前环境
 
-当前机器已安装 Xcode 26.6，可直接验证 Foundation Models 分支、单元测试、UI 测试和 Release 构建。以下基础模式命令仅用于没有完整 Xcode 的备用环境。
+本机安装 **Xcode 27.0（27A266a）**，Swift 6.4，可验证 Foundation Models 分支、单元测试和 Release 构建。
+
+**UI 测试当前无法运行**：本机 CoreSimulator 版本落后于 Xcode 要求，`xcodebuild` 会报
+`CoreSimulator is out of date. Current version (1051.55.0) is older than build version (1171.7.0)`
+并禁用模拟器设备支持，同时 `DVTCoreDeviceCore` 插件加载失败。需要更新 Xcode 命令行工具或
+系统组件后才能执行 `xcodebuild -project AIFileOrganizer.xcodeproj -scheme AIFileOrganizer test`。
+在此之前，UI 测试用例的改动属于“未在本机执行过”。
+
+`xcodebuild` 在受限沙箱下还会因为无法写入 `~/Library/Caches/org.swift.swiftpm` 而无法解析依赖；
+用 `swift build` / `swift test` 配合下面的模块缓存参数可以绕过。
+
+以下基础模式命令仅用于没有完整 Xcode 的备用环境。
 
 ```bash
 SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \

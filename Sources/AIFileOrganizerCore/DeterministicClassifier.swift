@@ -13,6 +13,9 @@ public struct DeterministicClassifier: Sendable {
     "presentation": ["presentation", "presentations", "slides", "演示", "幻灯片"],
   ]
 
+  /// 证据类型：目标目录内已存在同一作者的作品。排序时作为强身份证据使用。
+  static let creatorExampleEvidenceKind = "creator-example"
+
   public init() {}
 
   public func context(
@@ -58,6 +61,9 @@ public struct DeterministicClassifier: Sendable {
     }
     let profileByPath = Dictionary(uniqueKeysWithValues: profiles.map {
       ($0.relativePath, $0)
+    })
+    let pathByID = Dictionary(uniqueKeysWithValues: destinations.map {
+      ($0.id, $0.relativePath)
     })
     let extractedTokens = Set(KeywordTokenizer.tokens(from: item.extracted.text))
     let textTokensByPath = Dictionary(uniqueKeysWithValues: profiles.map { profile in
@@ -112,7 +118,7 @@ public struct DeterministicClassifier: Sendable {
               .isDisjoint(with: parsed.authorNames.map(CreatorCatalog.key))
           }) {
             score += 0.3
-            evidence.append(Evidence(kind: "creator-example",
+            evidence.append(Evidence(kind: Self.creatorExampleEvidenceKind,
               detail: "目录内已有同一作者的作品", weight: 0.3))
           }
         }
@@ -153,12 +159,29 @@ public struct DeterministicClassifier: Sendable {
         }
       }
       guard score > 0 else { return nil }
+      // score 是累加的证据总分，没有上限（见 RankedCandidate.normalizedScore）；
+      // 展示与门槛必须各自选择合适的那一个，不要在这里截断，否则强证据会被
+      // 压成和通用类型证据相同的分数，首选目录反而排错。
       return RankedCandidate(
         destinationID: destination.id, score: score, evidence: evidence)
     }.sorted { lhs, rhs in
-      lhs.score == rhs.score
-        ? lhs.destinationID.uuidString < rhs.destinationID.uuidString : lhs.score > rhs.score
+      Self.isOrderedBefore(lhs, rhs, pathByID: pathByID)
     }
+  }
+
+  /// 确定性排序：先比归一化分数；同分时优先“目录内已有同一作者”的强身份证据，
+  /// 最后按目录相对路径排序。刻意不使用 UUID，避免同分时首选目录随机化。
+  static func isOrderedBefore(
+    _ lhs: RankedCandidate, _ rhs: RankedCandidate, pathByID: [UUID: String]
+  ) -> Bool {
+    if lhs.score != rhs.score { return lhs.score > rhs.score }
+    let lhsSameCreator = lhs.evidence.contains { $0.kind == Self.creatorExampleEvidenceKind }
+    let rhsSameCreator = rhs.evidence.contains { $0.kind == Self.creatorExampleEvidenceKind }
+    if lhsSameCreator != rhsSameCreator { return lhsSameCreator }
+    let lhsPath = pathByID[lhs.destinationID] ?? ""
+    let rhsPath = pathByID[rhs.destinationID] ?? ""
+    if lhsPath != rhsPath { return lhsPath < rhsPath }
+    return lhs.destinationID.uuidString < rhs.destinationID.uuidString
   }
 
   public func proposal(sessionID: UUID, item: ItemContext, candidates: [RankedCandidate])

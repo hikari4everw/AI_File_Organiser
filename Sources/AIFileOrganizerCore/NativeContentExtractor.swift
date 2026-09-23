@@ -96,8 +96,10 @@ public actor NativeContentExtractor: ContentExtractor {
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = false
     let preferred = ["ja-JP", "zh-Hans", "zh-Hant", "en-US"]
-    let supported = (try? VNRecognizeTextRequest.supportedRecognitionLanguages(
-      for: .accurate, revision: request.revision)) ?? []
+    // 用请求自身的 supportedRecognitionLanguages（macOS 12+）查询，替代已废弃的
+    // 类方法 supportedRecognitionLanguages(for:revision:)。必须在设定
+    // recognitionLevel 之后调用，返回值才对应准确模式。
+    let supported = (try? request.supportedRecognitionLanguages()) ?? []
     request.recognitionLanguages = preferred.filter(supported.contains)
     do {
       try VNImageRequestHandler(cgImage: cgImage).perform([request])

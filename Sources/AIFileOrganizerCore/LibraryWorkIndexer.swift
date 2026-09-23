@@ -104,12 +104,22 @@ public struct LibraryWorkIndexer: Sendable {
       } else if depth > 1, !childRoles.isEmpty,
         childRoles.allSatisfy({ $0 == .work }), files.isEmpty
       {
-        role = .creator
+        // “分类/作者/作品”和“分类/分类/作品”结构上无法区分，不能一律当成作者容器，
+        // 否则深层分类目录会从目标列表消失。只有名字确实能在子作品名里作为社团或
+        // 作者出现时，才认定它是作者容器；否则按分类处理，用户仍可手动纠正。
+        role = Self.looksLikeCreatorContainer(
+          name: directory.lastPathComponent,
+          childWorkNames: directories.map { $0.0.lastPathComponent })
+          ? .creator : .category
       } else if depth > 1, directories.isEmpty,
         files.allSatisfy({ ["pdf", "cbz", "zip", "rar", "7z", "epub"].contains(
           $0.0.pathExtension.lowercased()) })
       {
-        role = .creator
+        // 同一类歧义：只放压缩包/PDF 的层，既可能是作者容器，也可能是子分类。
+        role = Self.looksLikeCreatorContainer(
+          name: directory.lastPathComponent,
+          childWorkNames: files.map { $0.0.lastPathComponent })
+          ? .creator : .category
       } else {
         role = .category
       }
@@ -126,5 +136,23 @@ public struct LibraryWorkIndexer: Sendable {
         role: roleOverrides[relativePath] ?? role, kind: .directory))
     }
     return roleOverrides[relativePath] ?? role
+  }
+
+  /// 判定一个中间层是不是作者（社团）容器。结构上无法区分“分类/作者/作品”和
+  /// “分类/分类/作品”，所以必须要有额外证据，满足任一条即可：
+  /// 1. 该层名字本身是 `[社团] 作者` / `[社团 (作者)]` 这种作者目录写法；
+  /// 2. 该层名字能在子作品名里作为社团或作者出现。
+  /// 第 1 条不可省：作者目录里的作品通常只写标题（如“旧作”），此时第 2 条不成立。
+  /// 两条都不成立时按分类处理，避免深层分类目录从目标列表整体消失。
+  static func looksLikeCreatorContainer(name: String, childWorkNames: [String]) -> Bool {
+    let key = CreatorCatalog.key(name)
+    guard !key.isEmpty else { return false }
+    if WorkNameParser().parse(name).circleName != nil { return true }
+    for childName in childWorkNames {
+      let parsed = WorkNameParser().parse(childName)
+      let fields = [parsed.circleName].compactMap { $0 } + parsed.authorNames
+      if fields.contains(where: { CreatorCatalog.key($0) == key }) { return true }
+    }
+    return false
   }
 }

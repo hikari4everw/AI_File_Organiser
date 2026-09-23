@@ -283,6 +283,8 @@ public struct Evidence: Codable, Hashable, Sendable {
 
 public struct RankedCandidate: Codable, Hashable, Sendable {
   public var destinationID: UUID
+  /// 累加的证据总分。没有上限：每种证据各自带权重，证据越多分越高。
+  /// 排序与决策门槛使用这个原始值，因为它保留了候选之间的强弱差异。
   public var score: Double
   public var evidence: [Evidence]
 
@@ -291,6 +293,11 @@ public struct RankedCandidate: Codable, Hashable, Sendable {
     self.score = score
     self.evidence = evidence
   }
+
+  /// 归一化到 0...1 的置信度，仅供界面按百分比展示。
+  /// 刻意不对 `score` 本身做截断：封顶会让“通用类型证据”和“强内容证据”
+  /// 得到相同分数，从而使首选目录排错。
+  public var normalizedScore: Double { min(max(score, 0), 1) }
 }
 
 public struct ModelProposal: Codable, Hashable, Sendable {

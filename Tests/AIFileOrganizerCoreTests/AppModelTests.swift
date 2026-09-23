@@ -189,4 +189,71 @@ import Testing
     #expect(url.path.hasPrefix(FileManager.default.temporaryDirectory.path))
     #expect(url.pathExtension == "sqlite")
   }
+
+  @Test func independentEntryRefusesToReplaceUnreviewedInboxReviewWithoutConfirmation() throws {
+    let database = try AppDatabase.inMemory()
+    let model = AppModel(database: database)
+    let workspace = Workspace(inboxPath: "/tmp/inbox", libraryPath: "/tmp/library",
+      inboxVolumeID: "volume", libraryVolumeID: "volume")
+    model.workspace = workspace
+    let session = OrganizationSession(workspaceID: workspace.id)
+    model.session = session
+    let inboxItem = ItemSnapshot(sessionID: session.id, path: "/tmp/inbox/new.pdf",
+      name: "new.pdf", kind: .file, fileExtension: "pdf")
+    model.items = [inboxItem]
+    model.proposals = [ClassificationProposal(
+      sessionID: session.id, itemID: inboxItem.id, action: .keep,
+      source: .deterministic, reviewDecision: .needsReview, status: .pending, reason: "待确认")]
+    model.selectedExistingWorkPaths = ["bunga/作品"]
+
+    #expect(model.hasUnreviewedInboxWork)
+    // 未确认时不得切换会话，收件箱复核必须原样保留。
+    #expect(!model.startExistingWorkReview())
+    #expect(model.session?.id == session.id)
+    #expect(model.items.map(\.id) == [inboxItem.id])
+  }
+
+  @Test func independentEntryDoesNotOfferReplacementWhenInboxReviewIsFinished() throws {
+    let database = try AppDatabase.inMemory()
+    let model = AppModel(database: database)
+    let workspace = Workspace(inboxPath: "/tmp/inbox", libraryPath: "/tmp/library",
+      inboxVolumeID: "volume", libraryVolumeID: "volume")
+    model.workspace = workspace
+    let session = OrganizationSession(workspaceID: workspace.id)
+    model.session = session
+
+    // 空会话没有未处理项目，切换不需要确认。
+    #expect(!model.hasUnreviewedInboxWork)
+    // 但没有勾选作品时仍然不能进入，避免生成空方案。
+    #expect(model.selectedExistingWorkPaths.isEmpty)
+    #expect(!model.startExistingWorkReview(confirmingReplacement: true))
+  }
+
+  @Test func existingWorkItemsIncludeOnlyReadableSelectedWorks() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let selected = root.appendingPathComponent("bunga/作品甲", isDirectory: true)
+    try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: true)
+    try Data().write(to: selected.appendingPathComponent("001.jpg"))
+    // 指向资料库外的符号链接作品必须被跳过。
+    let symlink = root.appendingPathComponent("bunga/链接作品", isDirectory: true)
+    try FileManager.default.createSymbolicLink(
+      at: symlink, withDestinationURL: root.appendingPathComponent("bunga/作品甲"))
+
+    let model = AppModel()
+    let sessionID = UUID()
+    let items = model.existingWorkItems(
+      from: [
+        LibraryWorkNode(relativePath: "bunga/作品甲", role: .work, kind: .directory),
+        LibraryWorkNode(relativePath: "bunga/链接作品", role: .work, kind: .directory),
+        LibraryWorkNode(relativePath: "bunga/不存在", role: .work, kind: .directory),
+      ],
+      sessionID: sessionID, libraryRoot: root)
+
+    #expect(items.count == 1)
+    #expect(items.first?.name == "作品甲")
+    #expect(items.first?.sessionID == sessionID)
+    // 未勾选的作品不在输入里，也就不可能进入计划。
+    #expect(!items.contains { $0.name == "作品乙" })
+  }
 }

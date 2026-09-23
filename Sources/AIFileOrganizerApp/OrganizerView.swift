@@ -6,6 +6,7 @@ struct OrganizerView: View {
   @ObservedObject var model: AppModel
   @State private var page: OrganizerPage = .plan
   @State private var showExecutionConfirmation = false
+  @State private var showExistingWorkSwitch = false
   @State private var showNewFolder = false
   @State private var newFolderName = ""
   @State private var selectedCatalogPath: String?
@@ -82,6 +83,21 @@ struct OrganizerView: View {
       }
     } message: {
       Text("目录只会在你执行整理时创建。")
+    }
+    .confirmationDialog("切换到“整理已有作品”？", isPresented: $showExistingWorkSwitch) {
+      Button("放弃当前收件箱复核并切换") {
+        model.startExistingWorkReview(confirmingReplacement: true)
+      }
+      Button("取消", role: .cancel) {}
+    } message: {
+      Text("当前收件箱复核还有未处理的项目。切换后本次复核会被替换，已执行的历史和撤销记录不受影响。")
+    }
+  }
+
+  /// 独立入口：不需要收件箱会话；只有当前收件箱复核未处理完时才先确认。
+  private func requestExistingWorkReview() {
+    if !model.startExistingWorkReview(), model.hasUnreviewedInboxWork {
+      showExistingWorkSwitch = true
     }
   }
 
@@ -274,8 +290,11 @@ struct OrganizerView: View {
             if !proposal.topCandidates.isEmpty {
               Text("候选目录").font(.headline)
               ForEach(proposal.topCandidates, id: \.destinationID) { candidate in
-                Text("\(model.destinationName(candidate.destinationID)) · \(Int(candidate.score * 100)) 分")
-                  .font(.caption).foregroundStyle(.secondary)
+                Text(
+                  "\(model.destinationName(candidate.destinationID)) · "
+                    + "\(Int(candidate.normalizedScore * 100)) 分"
+                )
+                .font(.caption).foregroundStyle(.secondary)
               }
             }
             ForEach(proposal.evidence, id: \.detail) { evidence in
@@ -479,10 +498,16 @@ struct OrganizerView: View {
                 }
               }
             }
-            Button("将勾选旧作加入本次复核") { model.includeSelectedExistingWorks() }
-              .buttonStyle(.borderedProminent)
-              .disabled(model.selectedExistingWorkPaths.isEmpty || model.session == nil
-                || model.isWorking)
+            HStack {
+              Button("整理所选旧作（独立入口）") { requestExistingWorkReview() }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("organize-existing-works")
+                .disabled(model.selectedExistingWorkPaths.isEmpty || model.isWorking
+                  || model.isTeachingConcept)
+              Button("加入本次复核") { model.includeSelectedExistingWorks() }
+                .disabled(model.selectedExistingWorkPaths.isEmpty || model.session == nil
+                  || model.isWorking)
+            }
           }
         }
       }

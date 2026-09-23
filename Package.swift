@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "AIFileOrganizerCore", targets: ["AIFileOrganizerCore"]),
         .executable(name: "AIFileOrganizer", targets: ["AIFileOrganizerApp"]),
         .executable(name: "AIFileOrganizerChecks", targets: ["AIFileOrganizerChecks"]),
+        .executable(name: "AIFileOrganizerAcceptance", targets: ["AIFileOrganizerAcceptance"]),
     ],
     dependencies: [
         // 7.6.1 is the newest release that also builds with the fallback macOS 15.4 SDK
@@ -37,6 +38,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "AIFileOrganizerChecks",
+            dependencies: ["AIFileOrganizerCore"]
+        ),
+        .executableTarget(
+            name: "AIFileOrganizerAcceptance",
             dependencies: ["AIFileOrganizerCore"]
         ),
         .testTarget(

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "description": "验收清单。示例条目的 id 以 sample- 开头，只用于演示字段与自检；评测工具会拒绝只用示例条目得出结论。请按 README 补齐至少 50 项留出样本（其中 30 项 definite-doujin）。",
+  "cases": [
+    {
+      "id": "sample-definite-doujin",
+      "name": "[おじたん屋さん (まめおじたん)] 愛娘性活 [中国翻訳] [DL版]",
+      "group": "definite-doujin",
+      "split": "holdout",
+      "expectedCategory": "bunga",
+      "expectedCreator": "bunga/[おじたん屋さん] まめおじたん",
+      "relativePath": null
+    },
+    {
+      "id": "sample-confusable",
+      "name": "annual-report.pdf",
+      "group": "confusable",
+      "split": "holdout",
+      "expectedCategory": "PDF",
+      "expectedCreator": null,
+      "relativePath": null
+    },
+    {
+      "id": "sample-dev-tuning",
+      "name": "[青空 (作者甲)] 新作 [DL版]",
+      "group": "definite-doujin",
+      "split": "dev",
+      "expectedCategory": "bunga",
+      "expectedCreator": null,
+      "relativePath": null
+    }
+  ]
+}

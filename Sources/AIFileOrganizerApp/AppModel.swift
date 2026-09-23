@@ -399,6 +399,104 @@ final class AppModel: ObservableObject {
     }
   }
 
+  /// 是否已有未处理完的收件箱复核。独立入口会切换到新会话，切换前需要用户确认。
+  var hasUnreviewedInboxWork: Bool {
+    session != nil && receipt == nil && !items.isEmpty
+      && proposals.contains { $0.status == .pending }
+  }
+
+  /// 独立的“整理已有作品”入口：新建一个只包含所选库内作品的会话，
+  /// 不扫描收件箱、不运行作品改名、不改已有作者目录名、不合并且不删除目录。
+  /// 返回 false 表示需要用户先确认替换当前未处理完的收件箱复核。
+  @discardableResult
+  func startExistingWorkReview(confirmingReplacement: Bool = false) -> Bool {
+    guard let workspace, let database, !isWorking, !isTeachingConcept,
+      !selectedExistingWorkPaths.isEmpty
+    else { return false }
+    if !confirmingReplacement, hasUnreviewedInboxWork { return false }
+    guard let catalog, let libraryIndex else {
+      catalogStatus = "请先分析资料库，再整理已有作品"
+      return false
+    }
+    let selected = libraryIndex.nodes.filter {
+      $0.role == .work && selectedExistingWorkPaths.contains($0.relativePath)
+    }.sorted { $0.relativePath < $1.relativePath }
+    guard !selected.isEmpty else { return false }
+
+    let libraryRoot = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    let resolvedDestinations = destinations.filter { $0.kind == .category }
+    let catalogResult = catalog
+    let rules = self.rules
+    let concepts = self.concepts
+
+    resetSession()
+    let session = OrganizationSession(workspaceID: workspace.id, state: .review)
+    self.session = session
+    self.destinations = resolvedDestinations
+    try? database.saveSession(session)
+    isWorking = true
+    runningTask = Task { [weak self] in
+      guard let self else { return }
+      defer {
+        self.isWorking = false
+        self.runningTask = nil
+      }
+      do {
+        let access = try SecurityScopedBookmarks.resolve(workspace)
+        defer { access.stop() }
+        let newItems = self.existingWorkItems(
+          from: selected, sessionID: session.id, libraryRoot: libraryRoot)
+        guard !newItems.isEmpty else {
+          self.lastError = "所选作品都无法读取"
+          return
+        }
+        let resolutions = try self.creatorResolutions(
+          for: newItems, workspace: workspace, database: database)
+        let result = await ClassificationPipeline().run(
+          sessionID: session.id, items: newItems, destinations: resolvedDestinations,
+          rules: rules, concepts: concepts, catalog: catalogResult,
+          creatorResolutions: resolutions)
+        try Task.checkCancellation()
+        self.items = newItems
+        // 只有用户逐项勾选的库内作品才允许移动，必须写入来源白名单。
+        self.selectedSourceIDs = Set(newItems.map(\.id))
+        self.proposals = result.proposals.compactMap { proposal in
+          guard let item = newItems.first(where: { $0.id == proposal.itemID }) else { return nil }
+          return self.normalizeExistingWorkProposal(proposal, item: item)
+        }
+        self.folderProposals = result.folderProposals
+        self.renameProposals = []
+        try database.saveSnapshots(newItems)
+        try database.saveProposals(result.proposals)
+        try database.saveFolderProposals(result.folderProposals)
+        self.selectedExistingWorkPaths.removeAll()
+        self.statusMessage = "正在整理 \(newItems.count) 部已选作品；不改名、不合并且不删除原有目录"
+      } catch is CancellationError {
+        self.statusMessage = "已取消整理已有作品"
+      } catch {
+        self.lastError = error.localizedDescription
+      }
+    }
+    return true
+  }
+
+  /// 独立入口只接受用户勾选的作品节点：跳过不存在、符号链接和应用包，
+  /// 并给每个作品生成属于新会话的快照。未勾选的库内作品不会出现在结果里。
+  func existingWorkItems(
+    from nodes: [LibraryWorkNode], sessionID: UUID, libraryRoot: URL
+  ) -> [ItemSnapshot] {
+    nodes.compactMap { node -> ItemSnapshot? in
+      let url = libraryRoot.appendingPathComponent(node.relativePath)
+      guard FileManager.default.fileExists(atPath: url.path),
+        node.kind != .applicationBundle,
+        (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true
+      else { return nil }
+      return ItemSnapshot(
+        sessionID: sessionID, path: url.path, name: url.lastPathComponent,
+        kind: node.kind, fileExtension: url.pathExtension.lowercased())
+    }
+  }
+
   func includeSelectedExistingWorks() {
     guard let workspace, let database, let session, let catalog, let libraryIndex,
       !isWorking, !selectedExistingWorkPaths.isEmpty else { return }
