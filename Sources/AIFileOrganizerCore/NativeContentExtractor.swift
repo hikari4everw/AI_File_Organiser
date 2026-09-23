@@ -81,9 +81,12 @@ public actor NativeContentExtractor: ContentExtractor {
 
   private func recognize(_ cgImage: CGImage, source: String) -> ExtractedContext {
     let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .fast
+    request.recognitionLevel = .accurate
     request.usesLanguageCorrection = false
-    request.recognitionLanguages = ["zh-Hans", "en-US"]
+    let preferred = ["ja-JP", "zh-Hans", "zh-Hant", "en-US"]
+    let supported = (try? VNRecognizeTextRequest.supportedRecognitionLanguages(
+      for: .accurate, revision: request.revision)) ?? []
+    request.recognitionLanguages = preferred.filter(supported.contains)
     do {
       try VNImageRequestHandler(cgImage: cgImage).perform([request])
       let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(

@@ -54,6 +54,32 @@ import Testing
     #expect(summary.hasSequentialNames)
   }
 
+  @Test func imageOCRReadsJapaneseTitle() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("title.png")
+    let image = NSImage(size: NSSize(width: 1000, height: 220))
+    image.lockFocus()
+    NSColor.white.setFill()
+    NSRect(x: 0, y: 0, width: 1000, height: 220).fill()
+    NSString(string: "日本語テスト").draw(
+      at: NSPoint(x: 50, y: 55),
+      withAttributes: [.font: NSFont.systemFont(ofSize: 90), .foregroundColor: NSColor.black])
+    image.unlockFocus()
+    let tiff = try #require(image.tiffRepresentation)
+    let bitmap = try #require(NSBitmapImageRep(data: tiff))
+    let data = try #require(bitmap.representation(using: .png, properties: [:]))
+    try data.write(to: file)
+
+    let item = ItemSnapshot(
+      sessionID: UUID(), path: file.path, name: file.lastPathComponent,
+      kind: .file, fileExtension: "png")
+    let result = await NativeContentExtractor().extractContext(for: item)
+
+    #expect(result.text.contains("日本語"))
+  }
+
   private func makePDF(pages: [String], at url: URL) throws {
     let data = NSMutableData()
     guard let consumer = CGDataConsumer(data: data) else { throw CocoaError(.fileWriteUnknown) }

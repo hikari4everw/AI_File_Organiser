@@ -290,6 +290,20 @@ public final class AppDatabase: @unchecked Sendable {
         table.uniqueKey(["concept_id", "item_identity"])
       }
     }
+    migrator.registerMigration("v2.4-catalog-analysis") { db in
+      try db.create(table: "catalog_work_analyses") { table in
+        table.column("workspace_id", .text).notNull()
+        table.column("relative_path", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.primaryKey(["workspace_id", "relative_path"])
+      }
+      try db.create(table: "catalog_profile_overrides") { table in
+        table.column("workspace_id", .text).notNull()
+        table.column("relative_path", .text).notNull()
+        table.column("payload_json", .blob).notNull()
+        table.primaryKey(["workspace_id", "relative_path"])
+      }
+    }
     try migrator.migrate(queue)
   }
 
@@ -1023,5 +1037,51 @@ public final class AppDatabase: @unchecked Sendable {
     ]
     guard allowed.contains(table) else { throw OrganizerError.persistenceFailed("未知数据表") }
     return try queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)") ?? 0 }
+  }
+
+  public func catalogWorkAnalysis(workspaceID: UUID, path: String) throws
+    -> CatalogWorkAnalysis?
+  {
+    try queue.read { db in
+      guard let payload: Data = try Data.fetchOne(
+        db, sql: "SELECT payload_json FROM catalog_work_analyses WHERE workspace_id = ? AND relative_path = ?",
+        arguments: [workspaceID.uuidString, path]) else { return nil }
+      return try decode(CatalogWorkAnalysis.self, from: payload)
+    }
+  }
+
+  public func saveCatalogWorkAnalysis(_ analysis: CatalogWorkAnalysis, workspaceID: UUID) throws {
+    let payload = try encode(analysis)
+    try queue.write { db in
+      try db.execute(sql: """
+        INSERT INTO catalog_work_analyses (workspace_id, relative_path, payload_json)
+        VALUES (?, ?, ?) ON CONFLICT(workspace_id, relative_path)
+        DO UPDATE SET payload_json = excluded.payload_json
+        """, arguments: [workspaceID.uuidString, analysis.relativePath, payload])
+    }
+  }
+
+  public func catalogProfileOverride(workspaceID: UUID, path: String) throws
+    -> CatalogProfileOverride?
+  {
+    try queue.read { db in
+      guard let payload: Data = try Data.fetchOne(
+        db, sql: "SELECT payload_json FROM catalog_profile_overrides WHERE workspace_id = ? AND relative_path = ?",
+        arguments: [workspaceID.uuidString, path]) else { return nil }
+      return try decode(CatalogProfileOverride.self, from: payload)
+    }
+  }
+
+  public func saveCatalogProfileOverride(
+    _ value: CatalogProfileOverride, workspaceID: UUID, path: String
+  ) throws {
+    let payload = try encode(value)
+    try queue.write { db in
+      try db.execute(sql: """
+        INSERT INTO catalog_profile_overrides (workspace_id, relative_path, payload_json)
+        VALUES (?, ?, ?) ON CONFLICT(workspace_id, relative_path)
+        DO UPDATE SET payload_json = excluded.payload_json
+        """, arguments: [workspaceID.uuidString, path, payload])
+    }
   }
 }
