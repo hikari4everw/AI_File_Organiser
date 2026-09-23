@@ -14,6 +14,8 @@ public struct DestinationIndexer: Sendable {
     kindsByRelativePath: [String: DestinationKind] = [:]
   ) throws -> [DestinationProfile] {
     let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    let rolesByPath = Dictionary(uniqueKeysWithValues: try LibraryWorkIndexer()
+      .index(root: library).nodes.map { ($0.relativePath, $0.role) })
     let boundedDepth = max(1, maxDepth)
     var discovered: [(URL, String, Int, DestinationKind)] = []
     try discover(
@@ -22,6 +24,7 @@ public struct DestinationIndexer: Sendable {
       depth: 1,
       maxDepth: boundedDepth,
       kinds: kindsByRelativePath,
+      roles: rolesByPath,
       output: &discovered
     )
     return discovered.map { url, relative, depth, kind in
@@ -45,6 +48,7 @@ public struct DestinationIndexer: Sendable {
     depth: Int,
     maxDepth: Int,
     kinds: [String: DestinationKind],
+    roles: [String: LibraryNodeRole],
     output: inout [(URL, String, Int, DestinationKind)]
   ) throws {
     guard depth <= maxDepth else { return }
@@ -64,15 +68,19 @@ public struct DestinationIndexer: Sendable {
         values.isPackage != true
       else { continue }
       let relative = relativePath(of: child, inside: root)
-      let kind = kinds[relative] ?? .category
-      output.append((child, relative, depth, kind))
-      if kind != .excluded && kind != .collection {
+      let inferred = roles[relative]
+      let kind = kinds[relative] ?? (inferred == .work ? .collection : .category)
+      if inferred != .work && inferred != .creator || kinds[relative] != nil {
+        output.append((child, relative, depth, kind))
+      }
+      if kind != .excluded && (kind != .collection || inferred == .creator) {
         try discover(
           parent: child,
           root: root,
           depth: depth + 1,
           maxDepth: maxDepth,
           kinds: kinds,
+          roles: roles,
           output: &output
         )
       }
