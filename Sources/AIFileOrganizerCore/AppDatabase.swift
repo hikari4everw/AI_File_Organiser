@@ -304,6 +304,13 @@ public final class AppDatabase: @unchecked Sendable {
         table.primaryKey(["workspace_id", "relative_path"])
       }
     }
+    migrator.registerMigration("v2.5-creator-identities") { db in
+      try db.create(table: "creator_identities") { table in
+        table.column("id", .text).primaryKey()
+        table.column("workspace_id", .text).notNull().indexed()
+        table.column("payload_json", .blob).notNull()
+      }
+    }
     try migrator.migrate(queue)
   }
 
@@ -1082,6 +1089,34 @@ public final class AppDatabase: @unchecked Sendable {
         VALUES (?, ?, ?) ON CONFLICT(workspace_id, relative_path)
         DO UPDATE SET payload_json = excluded.payload_json
         """, arguments: [workspaceID.uuidString, path, payload])
+    }
+  }
+
+  public func creatorIdentities(workspaceID: UUID) throws -> [CreatorIdentity] {
+    try queue.read { db in
+      try Data.fetchAll(db,
+        sql: "SELECT payload_json FROM creator_identities WHERE workspace_id = ? ORDER BY id",
+        arguments: [workspaceID.uuidString])
+        .map { try decode(CreatorIdentity.self, from: $0) }
+    }
+  }
+
+  public func creatorIdentity(id: UUID) throws -> CreatorIdentity? {
+    try queue.read { db in
+      guard let payload: Data = try Data.fetchOne(db,
+        sql: "SELECT payload_json FROM creator_identities WHERE id = ?",
+        arguments: [id.uuidString]) else { return nil }
+      return try decode(CreatorIdentity.self, from: payload)
+    }
+  }
+
+  public func saveCreatorIdentity(_ creator: CreatorIdentity) throws {
+    let payload = try encode(creator)
+    try queue.write { db in
+      try db.execute(sql: """
+        INSERT INTO creator_identities (id, workspace_id, payload_json) VALUES (?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json
+        """, arguments: [creator.id.uuidString, creator.workspaceID.uuidString, payload])
     }
   }
 }
