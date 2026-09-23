@@ -32,6 +32,73 @@ private actor ProgressRecorder {
 }
 
 @Suite struct ClassificationTests {
+  @Test func learnedDoujinshiPatternOutranksGenericPDFFolder() async {
+    let session = UUID()
+    let item = ItemSnapshot(sessionID: session, path: "/tmp/work.pdf",
+      name: "[おじたん屋さん (まめおじたん)] 愛娘性活 [中国翻訳] [DL版].pdf",
+      kind: .file, contentType: "com.adobe.pdf", fileExtension: "pdf")
+    let generic = DestinationProfile(relativePath: "PDF", displayName: "PDF", keywords: ["pdf"])
+    let doujin = DestinationProfile(relativePath: "bunga", displayName: "bunga")
+    let catalog = CatalogAnalysisResult(profiles: [
+      CatalogProfile(relativePath: "PDF", workNames: ["report.pdf"], nameFrequencies: [:],
+        totalWorks: 1, contentAnalyzedWorks: 0, userPurpose: "", referenceWorkPaths: []),
+      CatalogProfile(relativePath: "bunga", workNames: [
+        "[青空 (作者甲)] 作品甲 [DL版]", "[月屋 (作者乙)] 作品乙 [中国翻訳]",
+        "[おじたん屋さん (まめおじたん)] 旧作 [DL版]",
+      ], nameFrequencies: [:], totalWorks: 3, contentAnalyzedWorks: 0,
+        userPurpose: "", referenceWorkPaths: []),
+    ], workAnalyses: [], reusedWorkCount: 0, revision: "catalog-r1")
+    let result = await ClassificationPipeline(extractor: EmptyExtractor(),
+      provider: UnavailableProvider()).run(sessionID: session, items: [item],
+        destinations: [generic, doujin], catalog: catalog)
+    #expect(result.proposals.first?.destinationID == doujin.id)
+    #expect(result.proposals.first?.topCandidates.first?.destinationID == doujin.id)
+    #expect(result.proposals.first?.catalogRevision == "catalog-r1")
+    #expect(result.proposals.first?.evidence.contains { $0.kind == "name-pattern" } == true)
+  }
+
+  @Test func confirmedAuthorUsesBoundExistingFolder() async {
+    let session = UUID()
+    let item = ItemSnapshot(sessionID: session, path: "/tmp/work",
+      name: "[青空 (作者甲)] 作品甲", kind: .directory)
+    let category = DestinationProfile(relativePath: "bunga", displayName: "bunga")
+    let creator = CreatorIdentity(workspaceID: UUID(), japaneseName: "作者甲",
+      englishName: nil, circleName: "青空",
+      preferredDestinations: ["bunga": "bunga/[青空] 作者甲"])
+    let catalog = CatalogAnalysisResult(profiles: [CatalogProfile(relativePath: "bunga",
+      workNames: ["[青空 (作者甲)] 旧作"], nameFrequencies: [:], totalWorks: 1,
+      contentAnalyzedWorks: 0, userPurpose: "", referenceWorkPaths: [])],
+      workAnalyses: [], reusedWorkCount: 0, revision: "r1")
+    let result = await ClassificationPipeline(extractor: EmptyExtractor(),
+      provider: UnavailableProvider()).run(sessionID: session, items: [item],
+        destinations: [category], catalog: catalog,
+        creatorResolutions: [item.id: .confirmed(creator)])
+    #expect(result.proposals.first?.creatorID == creator.id)
+    #expect(result.proposals.first?.creatorDestinationPath == "bunga/[青空] 作者甲")
+    #expect(result.proposals.first?.reviewDecision == .ready)
+  }
+
+  @Test func unknownAuthorStaysAtCategoryRootAndCircleIsNotIdentity() async {
+    let session = UUID()
+    let item = ItemSnapshot(sessionID: session, path: "/tmp/work",
+      name: "[青空 (作者乙)] 新作", kind: .directory)
+    let category = DestinationProfile(relativePath: "bunga", displayName: "bunga")
+    let another = CreatorIdentity(workspaceID: UUID(), japaneseName: "作者甲",
+      englishName: nil, circleName: "青空",
+      preferredDestinations: ["bunga": "bunga/[青空] 作者甲"])
+    let catalog = CatalogAnalysisResult(profiles: [CatalogProfile(relativePath: "bunga",
+      workNames: ["[青空 (作者甲)] 旧作"], nameFrequencies: [:], totalWorks: 1,
+      contentAnalyzedWorks: 0, userPurpose: "", referenceWorkPaths: [])],
+      workAnalyses: [], reusedWorkCount: 0, revision: "r1")
+    let result = await ClassificationPipeline(extractor: EmptyExtractor(),
+      provider: UnavailableProvider()).run(sessionID: session, items: [item],
+        destinations: [category], catalog: catalog,
+        creatorResolutions: [item.id: .candidates([another])])
+    #expect(result.proposals.first?.destinationID == category.id)
+    #expect(result.proposals.first?.creatorID == nil)
+    #expect(result.proposals.first?.creatorDestinationPath == nil)
+    #expect(result.proposals.first?.reviewDecision == .needsReview)
+  }
   @Test func conceptCandidateStillAllowsIndependentSemanticRuleToSuggestInReview() async {
     let session = UUID()
     let item = ItemSnapshot(

@@ -47,7 +47,9 @@ public struct ClassificationPipeline: Sendable {
     destinations: [DestinationProfile],
     rules: [OrganizationRule] = [],
     concepts: [FileConcept] = [],
-    recognitionByItem: [UUID: ConceptRecognitionResult] = [:]
+    recognitionByItem: [UUID: ConceptRecognitionResult] = [:],
+    catalog: CatalogAnalysisResult? = nil,
+    creatorResolutions: [UUID: CreatorResolution] = [:]
   ) async -> ClassificationPipelineResult {
     await run(
       sessionID: sessionID,
@@ -56,6 +58,8 @@ public struct ClassificationPipeline: Sendable {
       rules: rules,
       concepts: concepts,
       recognitionByItem: recognitionByItem,
+      catalog: catalog,
+      creatorResolutions: creatorResolutions,
       progress: { _ in }
     )
   }
@@ -67,6 +71,8 @@ public struct ClassificationPipeline: Sendable {
     rules: [OrganizationRule] = [],
     concepts: [FileConcept] = [],
     recognitionByItem: [UUID: ConceptRecognitionResult] = [:],
+    catalog: CatalogAnalysisResult? = nil,
+    creatorResolutions: [UUID: CreatorResolution] = [:],
     progress: @escaping OrganizationProgressHandler
   ) async -> ClassificationPipelineResult {
     var final: [UUID: ClassificationProposal] = [:]
@@ -117,7 +123,7 @@ public struct ClassificationPipeline: Sendable {
         }
         continue
       }
-      let candidates = classifier.rank(basic, destinations: destinations)
+      let candidates = classifier.rank(basic, destinations: destinations, catalog: catalog)
       candidatesByItem[item.id] = candidates
       if recognition?.status == .unknown || recognition == nil,
         let proposal = classifier.proposal(
@@ -197,7 +203,7 @@ public struct ClassificationPipeline: Sendable {
             }
           }
         }
-        let reranked = classifier.rank(enriched, destinations: destinations)
+        let reranked = classifier.rank(enriched, destinations: destinations, catalog: catalog)
         candidatesByItem[item.id] = reranked
         ambiguous.append(enriched)
       }
@@ -298,7 +304,40 @@ public struct ClassificationPipeline: Sendable {
       }
     }
 
-    let proposals = items.compactMap { final[$0.id] }
+    let destinationsByID = Dictionary(uniqueKeysWithValues: destinations.map { ($0.id, $0) })
+    let proposals = items.compactMap { item -> ClassificationProposal? in
+      guard var proposal = final[item.id] else { return nil }
+      proposal.topCandidates = Array((candidatesByItem[item.id] ?? []).prefix(3))
+      proposal.catalogRevision = catalog?.revision
+      guard proposal.action == .move, proposal.source != .user,
+        let destinationID = proposal.destinationID,
+        let category = destinationsByID[destinationID]
+      else { return proposal }
+      switch creatorResolutions[item.id] {
+      case .confirmed(let creator):
+        proposal.creatorID = creator.id
+        if let bound = creator.preferredDestinations[category.relativePath],
+          bound.hasPrefix(category.relativePath + "/"),
+          !bound.dropFirst(category.relativePath.count + 1).contains("/")
+        {
+          proposal.creatorDestinationPath = bound
+          proposal.evidence.append(Evidence(kind: "creator",
+            detail: "已确认作者及其现有目录", weight: 1))
+        } else if let name = try? PathSafety.validateFolderName(creator.proposedDirectoryName) {
+          proposal.suggestedFolderName = name
+          proposal.reviewDecision = .needsReview
+          proposal.evidence.append(Evidence(kind: "creator",
+            detail: "已确认作者，需审核新作者目录", weight: 1))
+        }
+      case .candidates, .ambiguous:
+        proposal.reviewDecision = .needsReview
+        proposal.evidence.append(Evidence(kind: "creator",
+          detail: "作者身份有歧义，请人工确认", weight: 0))
+      case .unknown, nil:
+        break
+      }
+      return proposal
+    }
     let folderProposals = Self.coalesceFolderProposals(sessionID: sessionID, proposals: proposals)
     return ClassificationPipelineResult(
       proposals: proposals, folderProposals: folderProposals, modelStatus: modelStatus,

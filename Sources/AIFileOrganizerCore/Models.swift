@@ -327,6 +327,10 @@ public struct ClassificationProposal: Codable, Hashable, Identifiable, Sendable 
   public var status: ProposalStatus
   public var reason: String
   public var evidence: [Evidence]
+  public var topCandidates: [RankedCandidate]
+  public var catalogRevision: String?
+  public var creatorID: UUID?
+  public var creatorDestinationPath: String?
 
   public init(
     id: UUID = UUID(),
@@ -339,7 +343,9 @@ public struct ClassificationProposal: Codable, Hashable, Identifiable, Sendable 
     reviewDecision: ReviewDecision,
     status: ProposalStatus = .pending,
     reason: String,
-    evidence: [Evidence] = []
+    evidence: [Evidence] = [], topCandidates: [RankedCandidate] = [],
+    catalogRevision: String? = nil, creatorID: UUID? = nil,
+    creatorDestinationPath: String? = nil
   ) {
     self.id = id
     self.sessionID = sessionID
@@ -352,6 +358,54 @@ public struct ClassificationProposal: Codable, Hashable, Identifiable, Sendable 
     self.status = status
     self.reason = reason
     self.evidence = evidence
+    self.topCandidates = topCandidates
+    self.catalogRevision = catalogRevision
+    self.creatorID = creatorID
+    self.creatorDestinationPath = creatorDestinationPath
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, sessionID, itemID, action, destinationID, suggestedFolderName, source,
+      reviewDecision, status, reason, evidence, topCandidates, catalogRevision,
+      creatorID, creatorDestinationPath
+  }
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.container(keyedBy: CodingKeys.self)
+    id = try value.decode(UUID.self, forKey: .id)
+    sessionID = try value.decode(UUID.self, forKey: .sessionID)
+    itemID = try value.decode(UUID.self, forKey: .itemID)
+    action = try value.decode(ProposalAction.self, forKey: .action)
+    destinationID = try value.decodeIfPresent(UUID.self, forKey: .destinationID)
+    suggestedFolderName = try value.decodeIfPresent(String.self, forKey: .suggestedFolderName)
+    source = try value.decode(ProposalSource.self, forKey: .source)
+    reviewDecision = try value.decode(ReviewDecision.self, forKey: .reviewDecision)
+    status = try value.decode(ProposalStatus.self, forKey: .status)
+    reason = try value.decode(String.self, forKey: .reason)
+    evidence = try value.decode([Evidence].self, forKey: .evidence)
+    topCandidates = try value.decodeIfPresent([RankedCandidate].self, forKey: .topCandidates) ?? []
+    catalogRevision = try value.decodeIfPresent(String.self, forKey: .catalogRevision)
+    creatorID = try value.decodeIfPresent(UUID.self, forKey: .creatorID)
+    creatorDestinationPath = try value.decodeIfPresent(String.self, forKey: .creatorDestinationPath)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var value = encoder.container(keyedBy: CodingKeys.self)
+    try value.encode(id, forKey: .id)
+    try value.encode(sessionID, forKey: .sessionID)
+    try value.encode(itemID, forKey: .itemID)
+    try value.encode(action, forKey: .action)
+    try value.encodeIfPresent(destinationID, forKey: .destinationID)
+    try value.encodeIfPresent(suggestedFolderName, forKey: .suggestedFolderName)
+    try value.encode(source, forKey: .source)
+    try value.encode(reviewDecision, forKey: .reviewDecision)
+    try value.encode(status, forKey: .status)
+    try value.encode(reason, forKey: .reason)
+    try value.encode(evidence, forKey: .evidence)
+    try value.encode(topCandidates, forKey: .topCandidates)
+    try value.encodeIfPresent(catalogRevision, forKey: .catalogRevision)
+    try value.encodeIfPresent(creatorID, forKey: .creatorID)
+    try value.encodeIfPresent(creatorDestinationPath, forKey: .creatorDestinationPath)
   }
 }
 

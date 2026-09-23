@@ -43,9 +43,25 @@ public struct DeterministicClassifier: Sendable {
     )
   }
 
-  public func rank(_ item: ItemContext, destinations: [DestinationProfile]) -> [RankedCandidate] {
+  public func rank(
+    _ item: ItemContext, destinations: [DestinationProfile],
+    catalog: CatalogAnalysisResult? = nil
+  ) -> [RankedCandidate] {
     let category = category(for: item.snapshot)
     let itemTokens = Set(item.normalizedKeywords)
+    let parsed = WorkNameParser().parse(item.snapshot.name)
+    let profileByPath = Dictionary(uniqueKeysWithValues: (catalog?.profiles ?? []).map {
+      ($0.relativePath, $0)
+    })
+    let extractedTokens = Set(KeywordTokenizer.tokens(from: item.extracted.text))
+    let textTokensByPath = Dictionary(uniqueKeysWithValues: (catalog?.profiles ?? []).map { profile in
+      (profile.relativePath, Set((catalog?.workAnalyses ?? [])
+        .filter { $0.relativePath.hasPrefix(profile.relativePath + "/") }
+        .flatMap { KeywordTokenizer.tokens(from: $0.extractedText) }))
+    })
+    let documentFrequency = textTokensByPath.values.reduce(into: [String: Int]()) { counts, tokens in
+      for token in tokens { counts[token, default: 0] += 1 }
+    }
     return destinations.compactMap { destination in
       let destinationTokens = Set(
         destination.keywords + KeywordTokenizer.tokens(from: destination.displayName))
@@ -71,9 +87,45 @@ public struct DeterministicClassifier: Sendable {
         score += 0.35
         evidence.append(Evidence(kind: "profile", detail: "目标目录包含同类文件", weight: 0.35))
       }
+      if let profile = profileByPath[destination.relativePath] {
+        let examples = profile.workNames.map { WorkNameParser().parse($0) }
+        let matchingShape = examples.filter {
+          $0.circleName != nil && !$0.authorNames.isEmpty
+        }
+        if parsed.circleName != nil, !parsed.authorNames.isEmpty,
+          matchingShape.count * 2 >= max(1, examples.count)
+        {
+          let value = matchingShape.count >= 2 ? 1.05 : 0.75
+          score += value
+          evidence.append(Evidence(kind: "name-pattern",
+            detail: "作品名与目录内的社团、作者命名格式相符", weight: value))
+          if examples.contains(where: { example in
+            !Set(example.authorNames.map(CreatorCatalog.key))
+              .isDisjoint(with: parsed.authorNames.map(CreatorCatalog.key))
+          }) {
+            score += 0.3
+            evidence.append(Evidence(kind: "creator-example",
+              detail: "目录内已有同一作者的作品", weight: 0.3))
+          }
+        }
+        let rareOverlap = extractedTokens.intersection(textTokensByPath[profile.relativePath] ?? [])
+          .filter { documentFrequency[$0] == 1 && $0.count >= 3 }
+        if !rareOverlap.isEmpty {
+          let value = min(0.5, Double(rareOverlap.count) * 0.16)
+          score += value
+          evidence.append(Evidence(kind: "content-text",
+            detail: "正文与目录样本有特征词：" + rareOverlap.sorted().prefix(3).joined(separator: "、"),
+            weight: value))
+        }
+        let purposeOverlap = itemTokens.intersection(KeywordTokenizer.tokens(from: profile.userPurpose))
+        if !purposeOverlap.isEmpty {
+          score += 0.4
+          evidence.append(Evidence(kind: "purpose", detail: "符合人工标注的目录用途", weight: 0.4))
+        }
+      }
       guard score > 0 else { return nil }
       return RankedCandidate(
-        destinationID: destination.id, score: min(score, 1), evidence: evidence)
+        destinationID: destination.id, score: score, evidence: evidence)
     }.sorted { lhs, rhs in
       lhs.score == rhs.score
         ? lhs.destinationID.uuidString < rhs.destinationID.uuidString : lhs.score > rhs.score
