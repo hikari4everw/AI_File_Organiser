@@ -416,6 +416,7 @@ public struct FolderProposal: Codable, Hashable, Identifiable, Sendable {
   public var displayName: String
   public var status: FolderProposalStatus
   public var relatedItemIDs: [UUID]
+  public var parentDestinationID: UUID?
 
   public init(
     id: UUID = UUID(),
@@ -423,7 +424,7 @@ public struct FolderProposal: Codable, Hashable, Identifiable, Sendable {
     normalizedName: String,
     displayName: String,
     status: FolderProposalStatus = .pending,
-    relatedItemIDs: [UUID]
+    relatedItemIDs: [UUID], parentDestinationID: UUID? = nil
   ) {
     self.id = id
     self.sessionID = sessionID
@@ -431,6 +432,23 @@ public struct FolderProposal: Codable, Hashable, Identifiable, Sendable {
     self.displayName = displayName
     self.status = status
     self.relatedItemIDs = relatedItemIDs
+    self.parentDestinationID = parentDestinationID
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, sessionID, normalizedName, displayName, status, relatedItemIDs,
+      parentDestinationID
+  }
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.container(keyedBy: CodingKeys.self)
+    id = try value.decode(UUID.self, forKey: .id)
+    sessionID = try value.decode(UUID.self, forKey: .sessionID)
+    normalizedName = try value.decode(String.self, forKey: .normalizedName)
+    displayName = try value.decode(String.self, forKey: .displayName)
+    status = try value.decode(FolderProposalStatus.self, forKey: .status)
+    relatedItemIDs = try value.decode([UUID].self, forKey: .relatedItemIDs)
+    parentDestinationID = try value.decodeIfPresent(UUID.self, forKey: .parentDestinationID)
   }
 }
 
@@ -542,16 +560,36 @@ public struct OrganizationPlan: Codable, Hashable, Identifiable, Sendable {
   public var createdAt: Date
   public var confirmedAt: Date
   public var operations: [PlannedOperation]
+  public var reviewedSourcePaths: [String]
+  public var catalogRevision: String?
 
   public init(
     id: UUID = UUID(), sessionID: UUID, createdAt: Date = Date(),
-    confirmedAt: Date = Date(), operations: [PlannedOperation]
+    confirmedAt: Date = Date(), operations: [PlannedOperation],
+    reviewedSourcePaths: [String] = [], catalogRevision: String? = nil
   ) {
     self.id = id
     self.sessionID = sessionID
     self.createdAt = createdAt
     self.confirmedAt = confirmedAt
     self.operations = operations.sorted { $0.sequence < $1.sequence }
+    self.reviewedSourcePaths = reviewedSourcePaths.sorted()
+    self.catalogRevision = catalogRevision
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, sessionID, createdAt, confirmedAt, operations, reviewedSourcePaths, catalogRevision
+  }
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.container(keyedBy: CodingKeys.self)
+    id = try value.decode(UUID.self, forKey: .id)
+    sessionID = try value.decode(UUID.self, forKey: .sessionID)
+    createdAt = try value.decode(Date.self, forKey: .createdAt)
+    confirmedAt = try value.decode(Date.self, forKey: .confirmedAt)
+    operations = try value.decode([PlannedOperation].self, forKey: .operations)
+    reviewedSourcePaths = try value.decodeIfPresent([String].self, forKey: .reviewedSourcePaths) ?? []
+    catalogRevision = try value.decodeIfPresent(String.self, forKey: .catalogRevision)
   }
 }
 

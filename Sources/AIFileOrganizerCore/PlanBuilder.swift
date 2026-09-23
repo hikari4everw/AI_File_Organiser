@@ -10,9 +10,12 @@ public struct PlanBuilder: Sendable {
     destinations: [DestinationProfile],
     proposals: [ClassificationProposal],
     folderProposals: [FolderProposal],
-    renameProposals: [RenameProposal] = []
+    renameProposals: [RenameProposal] = [],
+    selectedSourceIDs: Set<UUID> = [],
+    catalogRevision: String? = nil
   ) throws -> OrganizationPlan {
     let library = URL(fileURLWithPath: workspace.libraryPath, isDirectory: true)
+    let inbox = URL(fileURLWithPath: workspace.inboxPath, isDirectory: true)
     let itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
     let destinationsByID = Dictionary(uniqueKeysWithValues: destinations.map { ($0.id, $0) })
     let renamesByItem = Dictionary(uniqueKeysWithValues: renameProposals.compactMap { proposal in
@@ -25,12 +28,22 @@ public struct PlanBuilder: Sendable {
     let approvedFolders = folderProposals.filter { $0.status == .approved }
     for folder in approvedFolders {
       let name = try PathSafety.validateFolderName(folder.displayName)
-      let destination = try PathSafety.safeDestination(library: library, relativePath: name)
+      let parent = folder.parentDestinationID.flatMap { destinationsByID[$0] }
+      if folder.parentDestinationID != nil && (parent == nil || parent?.kind != .category) {
+        throw OrganizerError.invalidWorkspace("作者目录的父分类不存在")
+      }
+      let relative = parent.map { $0.relativePath + "/" + name } ?? name
+      let destination = try PathSafety.safeDestination(library: library, relativePath: relative)
       let eligibleItemIDs = folder.relatedItemIDs.filter { itemID in
-        guard itemsByID[itemID] != nil, !handledItems.contains(itemID),
+        guard let item = itemsByID[itemID], !handledItems.contains(itemID),
+          sourceAllowed(item, inbox: inbox, library: library,
+            selectedSourceIDs: selectedSourceIDs),
           let itemProposal = proposals.first(where: { $0.itemID == itemID })
         else { return false }
-        return itemProposal.action == .suggestFolder
+        let matchesAction = parent == nil
+          ? itemProposal.action == .suggestFolder
+          : itemProposal.action == .move && itemProposal.destinationID == parent?.id
+        return matchesAction
           && PathSafety.normalizedFolderKey(itemProposal.suggestedFolderName ?? "")
             == folder.normalizedName
       }
@@ -40,7 +53,8 @@ public struct PlanBuilder: Sendable {
           sequence: sequence,
           kind: .createDirectory,
           destinationPath: destination.path,
-          createdByApp: true
+          createdByApp: true,
+          destinationID: parent?.id
         ))
       sequence += 1
       for itemID in eligibleItemIDs {
@@ -50,7 +64,7 @@ public struct PlanBuilder: Sendable {
             item: item,
             destinationDirectory: destination,
             sequence: sequence,
-            destinationID: DestinationIndexer().identifier(for: name),
+            destinationID: parent?.id ?? DestinationIndexer().identifier(for: name),
             confirmation: .userApproved,
             rename: renamesByItem[item.id]
           ))
@@ -60,15 +74,27 @@ public struct PlanBuilder: Sendable {
     }
 
     for proposal in proposals {
-      guard proposal.action == .move, !handledItems.contains(proposal.itemID) else { continue }
+      guard proposal.action == .move, !handledItems.contains(proposal.itemID),
+        proposal.suggestedFolderName == nil else { continue }
       let isAccepted =
         proposal.reviewDecision == .ready || proposal.status == .approved
         || proposal.status == .overridden
       guard isAccepted, let destinationID = proposal.destinationID,
         let destination = destinationsByID[destinationID], let item = itemsByID[proposal.itemID]
       else { continue }
+      guard sourceAllowed(item, inbox: inbox, library: library,
+        selectedSourceIDs: selectedSourceIDs) else { continue }
+      let relativePath: String
+      if let creatorPath = proposal.creatorDestinationPath {
+        guard creatorPath.hasPrefix(destination.relativePath + "/"),
+          !creatorPath.dropFirst(destination.relativePath.count + 1).contains("/")
+        else { throw OrganizerError.invalidWorkspace("作者目录不属于所选分类") }
+        relativePath = creatorPath
+      } else {
+        relativePath = destination.relativePath
+      }
       let directory = try PathSafety.safeDestination(
-        library: library, relativePath: destination.relativePath)
+        library: library, relativePath: relativePath)
       operations.append(
         try moveOperation(
           item: item,
@@ -84,6 +110,8 @@ public struct PlanBuilder: Sendable {
     }
 
     for item in items where !handledItems.contains(item.id) {
+      guard sourceAllowed(item, inbox: inbox, library: library,
+        selectedSourceIDs: selectedSourceIDs) else { continue }
       guard let rename = renamesByItem[item.id], let baseName = rename.selectedBaseName else {
         continue
       }
@@ -107,7 +135,28 @@ public struct PlanBuilder: Sendable {
       sequence += 1
     }
 
-    return OrganizationPlan(sessionID: sessionID, operations: operations)
+    let sources = operations.compactMap(\.sourcePath).map { URL(fileURLWithPath: $0) }
+    for left in sources.indices {
+      for right in sources.indices where left < right {
+        if PathSafety.contains(sources[left], sources[right])
+          || PathSafety.contains(sources[right], sources[left])
+        { throw OrganizerError.invalidWorkspace("不能同时选择父目录和其中的作品") }
+      }
+    }
+    let reviewed = sources.filter { !PathSafety.isDirectChild($0, of: inbox) }.map(\.path)
+    return OrganizationPlan(sessionID: sessionID, operations: operations,
+      reviewedSourcePaths: reviewed, catalogRevision: catalogRevision)
+  }
+
+  private func sourceAllowed(
+    _ item: ItemSnapshot, inbox: URL, library: URL,
+    selectedSourceIDs: Set<UUID>
+  ) -> Bool {
+    let source = URL(fileURLWithPath: item.path)
+    guard !item.isSymbolicLink else { return false }
+    if PathSafety.isDirectChild(source, of: inbox) { return true }
+    return selectedSourceIDs.contains(item.id)
+      && (PathSafety.contains(inbox, source) || PathSafety.contains(library, source))
   }
 
   private func moveOperation(

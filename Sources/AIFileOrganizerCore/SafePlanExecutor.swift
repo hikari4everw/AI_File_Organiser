@@ -4,12 +4,17 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
   private let workspace: Workspace
   private let database: AppDatabase
   private let fileManager: FileManager
+  private let catalogRevision: String?
   private let cancellation = ExecutorCancellation()
 
-  public init(workspace: Workspace, database: AppDatabase, fileManager: FileManager = .default) {
+  public init(
+    workspace: Workspace, database: AppDatabase, fileManager: FileManager = .default,
+    catalogRevision: String? = nil
+  ) {
     self.workspace = workspace
     self.database = database
     self.fileManager = fileManager
+    self.catalogRevision = catalogRevision
   }
 
   public func cancel() { cancellation.cancel() }
@@ -25,6 +30,25 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
       plan.operations.filter { $0.kind == .createDirectory }.map(\.destinationPath))
     let persistedStates = (try? database.operationStates(planID: plan.id)) ?? [:]
     var destinations: Set<String> = []
+    let reviewedSources = Set(plan.reviewedSourcePaths)
+    if let revision = plan.catalogRevision, revision != catalogRevision {
+      issues.append(contentsOf: plan.operations.map {
+        .init(operationID: $0.id, message: "目录画像已变化，请重新生成方案")
+      })
+    }
+    let plannedSources = plan.operations.compactMap { operation -> (UUID, URL)? in
+      operation.sourcePath.map { (operation.id, URL(fileURLWithPath: $0)) }
+    }
+    for left in plannedSources.indices {
+      for right in plannedSources.indices where left < right {
+        if PathSafety.contains(plannedSources[left].1, plannedSources[right].1)
+          || PathSafety.contains(plannedSources[right].1, plannedSources[left].1)
+        {
+          issues.append(.init(operationID: plannedSources[right].0,
+            message: "不能同时移动父目录和其中的作品"))
+        }
+      }
+    }
 
     await progress(
       OrganizationProgress(
@@ -63,8 +87,16 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
           issues.append(
             .init(operationID: operation.id, message: "建议目录已经存在：\(destination.lastPathComponent)"))
         }
-        if destination.deletingLastPathComponent() != PathSafety.normalized(library) {
-          issues.append(.init(operationID: operation.id, message: "只能创建资料库第一级目录"))
+        let parent = destination.deletingLastPathComponent()
+        if parent != PathSafety.normalized(library) {
+          var isDirectory: ObjCBool = false
+          if operation.destinationID == nil || !PathSafety.contains(library, parent)
+            || !fileManager.fileExists(atPath: parent.path, isDirectory: &isDirectory)
+            || !isDirectory.boolValue
+          {
+            issues.append(.init(operationID: operation.id,
+              message: "作者目录必须位于已存在的分类目录下"))
+          }
         }
       case .move:
         guard let sourcePath = operation.sourcePath else {
@@ -72,8 +104,10 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
           continue
         }
         let source = URL(fileURLWithPath: sourcePath)
-        if !PathSafety.isDirectChild(source, of: inbox) {
-          issues.append(.init(operationID: operation.id, message: "源文件不是收件箱直接子项"))
+        if !sourceIsAllowed(source, inbox: inbox, library: library,
+          reviewedSources: reviewedSources, planRevision: plan.catalogRevision)
+        {
+          issues.append(.init(operationID: operation.id, message: "源文件不在审核过的来源清单中"))
         }
         let isRecoveredMove =
           !fileManager.fileExists(atPath: source.path)
@@ -113,7 +147,9 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
           continue
         }
         let source = URL(fileURLWithPath: sourcePath)
-        if !PathSafety.isDirectChild(source, of: inbox) {
+        if !PathSafety.isDirectChild(source, of: inbox)
+          || hasSymbolicLinkComponent(source, under: inbox)
+        {
           issues.append(.init(operationID: operation.id, message: "源文件不是收件箱直接子项"))
         }
         let isRecoveredRename =
@@ -404,6 +440,38 @@ public final class SafePlanExecutor: PlanExecutor, @unchecked Sendable {
       PathSafety.normalized($0).path != sourcePath
         && PathSafety.normalizedCollisionKey($0.lastPathComponent) == desired
     }
+  }
+
+  private func sourceIsAllowed(
+    _ source: URL, inbox: URL, library: URL,
+    reviewedSources: Set<String>, planRevision: String?
+  ) -> Bool {
+    if PathSafety.isDirectChild(source, of: inbox) {
+      return !hasSymbolicLinkComponent(source, under: inbox)
+    }
+    guard reviewedSources.contains(source.path) else { return false }
+    if PathSafety.contains(inbox, source) {
+      return !hasSymbolicLinkComponent(source, under: inbox)
+    }
+    if PathSafety.contains(library, source) {
+      return planRevision != nil && planRevision == catalogRevision
+        && !hasSymbolicLinkComponent(source, under: library)
+    }
+    return false
+  }
+
+  private func hasSymbolicLinkComponent(_ source: URL, under root: URL) -> Bool {
+    let rootPath = root.standardizedFileURL.path
+    let sourcePath = source.standardizedFileURL.path
+    guard sourcePath.hasPrefix(rootPath + "/") else { return true }
+    var current = root
+    for component in sourcePath.dropFirst(rootPath.count + 1).split(separator: "/") {
+      current.appendPathComponent(String(component))
+      if (try? current.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+        return true
+      }
+    }
+    return false
   }
 }
 

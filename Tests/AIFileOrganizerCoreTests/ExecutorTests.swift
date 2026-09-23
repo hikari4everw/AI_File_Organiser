@@ -11,6 +11,150 @@ private actor ExecutionProgressRecorder {
 }
 
 @Suite struct ExecutorTests {
+  @Test func approvedCreatorFolderIsNestedUnderKnownCategoryAndUndoKeepsCategory() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.inbox.appendingPathComponent("[青空 (作者甲)] 作品", isDirectory: true)
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try Data("page".utf8).write(to: source.appendingPathComponent("01.jpg"))
+    let item = ItemSnapshot(sessionID: fixture.sessionID, path: source.path,
+      name: source.lastPathComponent, kind: .directory)
+    let category = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let proposal = ClassificationProposal(sessionID: fixture.sessionID, itemID: item.id,
+      action: .move, destinationID: category.id, suggestedFolderName: "[青空] 作者甲",
+      source: .deterministic, reviewDecision: .needsReview, status: .approved,
+      reason: "creator", creatorID: UUID())
+    let folder = FolderProposal(sessionID: fixture.sessionID,
+      normalizedName: PathSafety.normalizedFolderKey("[青空] 作者甲"),
+      displayName: "[青空] 作者甲", status: .approved,
+      relatedItemIDs: [item.id], parentDestinationID: category.id)
+    let plan = try PlanBuilder().build(sessionID: fixture.sessionID,
+      workspace: fixture.workspace, items: [item], destinations: [category],
+      proposals: [proposal], folderProposals: [folder], catalogRevision: "r1")
+    let creator = fixture.docs.appendingPathComponent("[青空] 作者甲", isDirectory: true)
+    #expect(plan.operations.first?.destinationPath == creator.path)
+    #expect(plan.operations.last?.destinationPath == creator.appendingPathComponent(item.name).path)
+    let executor = SafePlanExecutor(workspace: fixture.workspace,
+      database: fixture.database, catalogRevision: "r1")
+    var receipt: ExecutionReceipt?
+    for try await event in executor.execute(plan) {
+      if case .finished(let value) = event { receipt = value }
+    }
+    #expect(FileManager.default.fileExists(atPath: creator.appendingPathComponent(item.name).path))
+    for try await _ in executor.undo(plan: plan, receipt: try #require(receipt)) {}
+    #expect(!FileManager.default.fileExists(atPath: creator.path))
+    #expect(FileManager.default.fileExists(atPath: fixture.docs.path))
+  }
+
+  @Test func onlyExplicitlySelectedLibraryWorkMayMove() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.docs.appendingPathComponent("old-work", isDirectory: true)
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try Data("page".utf8).write(to: source.appendingPathComponent("01.jpg"))
+    let item = ItemSnapshot(sessionID: fixture.sessionID, path: source.path,
+      name: source.lastPathComponent, kind: .directory)
+    let category = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let creator = fixture.docs.appendingPathComponent("Creator", isDirectory: true)
+    try FileManager.default.createDirectory(at: creator, withIntermediateDirectories: true)
+    let proposal = ClassificationProposal(sessionID: fixture.sessionID, itemID: item.id,
+      action: .move, destinationID: category.id, source: .deterministic,
+      reviewDecision: .needsReview, status: .approved, reason: "creator",
+      creatorDestinationPath: "Docs/Creator")
+    let blocked = try PlanBuilder().build(sessionID: fixture.sessionID,
+      workspace: fixture.workspace, items: [item], destinations: [category],
+      proposals: [proposal], folderProposals: [])
+    #expect(blocked.operations.isEmpty)
+    let allowed = try PlanBuilder().build(sessionID: fixture.sessionID,
+      workspace: fixture.workspace, items: [item], destinations: [category],
+      proposals: [proposal], folderProposals: [], selectedSourceIDs: [item.id],
+      catalogRevision: "r1")
+    #expect(allowed.reviewedSourcePaths == [source.path])
+    #expect((await SafePlanExecutor(workspace: fixture.workspace,
+      database: fixture.database, catalogRevision: "r1").preflight(allowed)).isReady)
+    #expect(!(await SafePlanExecutor(workspace: fixture.workspace,
+      database: fixture.database, catalogRevision: "r2").preflight(allowed)).isReady)
+  }
+
+  @Test func legacyPlanCannotMoveLibrarySource() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let source = fixture.docs.appendingPathComponent("old.pdf")
+    try Data("old".utf8).write(to: source)
+    let operation = PlannedOperation(sequence: 0, kind: .move, sourcePath: source.path,
+      destinationPath: fixture.docs.appendingPathComponent("new.pdf").path,
+      preSnapshot: try .capture(source))
+    let plan = OrganizationPlan(sessionID: fixture.sessionID, operations: [operation])
+    #expect(!(await SafePlanExecutor(workspace: fixture.workspace,
+      database: fixture.database).preflight(plan)).isReady)
+  }
+
+  @Test func selectedNestedInboxWorkRequiresExactSourceReview() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let incoming = fixture.inbox.appendingPathComponent("batch", isDirectory: true)
+    try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+    let source = incoming.appendingPathComponent("work.pdf")
+    try Data("work".utf8).write(to: source)
+    let item = ItemSnapshot(sessionID: fixture.sessionID, path: source.path,
+      name: source.lastPathComponent, kind: .file)
+    let destination = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let proposal = ClassificationProposal(sessionID: fixture.sessionID, itemID: item.id,
+      action: .move, destinationID: destination.id, source: .user,
+      reviewDecision: .ready, reason: "selected")
+    let skipped = try PlanBuilder().build(sessionID: fixture.sessionID,
+      workspace: fixture.workspace, items: [item], destinations: [destination],
+      proposals: [proposal], folderProposals: [])
+    #expect(skipped.operations.isEmpty)
+    let plan = try PlanBuilder().build(sessionID: fixture.sessionID,
+      workspace: fixture.workspace, items: [item], destinations: [destination],
+      proposals: [proposal], folderProposals: [], selectedSourceIDs: [item.id])
+    #expect(plan.reviewedSourcePaths == [source.path])
+    #expect((await SafePlanExecutor(workspace: fixture.workspace,
+      database: fixture.database).preflight(plan)).isReady)
+    var forged = plan
+    forged.reviewedSourcePaths = []
+    #expect(!(await SafePlanExecutor(workspace: fixture.workspace,
+      database: fixture.database).preflight(forged)).isReady)
+  }
+
+  @Test func selectedParentAndChildCannotEnterOnePlan() throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let parent = fixture.inbox.appendingPathComponent("batch", isDirectory: true)
+    try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+    let child = parent.appendingPathComponent("work.pdf")
+    try Data("work".utf8).write(to: child)
+    let items = [ItemSnapshot(sessionID: fixture.sessionID, path: parent.path,
+      name: parent.lastPathComponent, kind: .directory),
+      ItemSnapshot(sessionID: fixture.sessionID, path: child.path,
+        name: child.lastPathComponent, kind: .file)]
+    let destination = DestinationProfile(relativePath: "Docs", displayName: "Docs")
+    let proposals = items.map { ClassificationProposal(sessionID: fixture.sessionID,
+      itemID: $0.id, action: .move, destinationID: destination.id,
+      source: .user, reviewDecision: .ready, reason: "selected") }
+    #expect(throws: (any Error).self) {
+      try PlanBuilder().build(sessionID: fixture.sessionID, workspace: fixture.workspace,
+        items: items, destinations: [destination], proposals: proposals, folderProposals: [],
+        selectedSourceIDs: [items[1].id])
+    }
+  }
+
+  @Test func selectedLibrarySymlinkIsBlockedEvenWhenItPointsInsideLibrary() async throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let actual = fixture.docs.appendingPathComponent("real.pdf")
+    try Data("real".utf8).write(to: actual)
+    let link = fixture.docs.appendingPathComponent("link.pdf")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: actual)
+    let operation = PlannedOperation(sequence: 0, kind: .move, sourcePath: link.path,
+      destinationPath: fixture.docs.appendingPathComponent("other.pdf").path,
+      preSnapshot: try .capture(link))
+    let plan = OrganizationPlan(sessionID: fixture.sessionID, operations: [operation],
+      reviewedSourcePaths: [link.path], catalogRevision: "r1")
+    #expect(!(await SafePlanExecutor(workspace: fixture.workspace,
+      database: fixture.database, catalogRevision: "r1").preflight(plan)).isReady)
+  }
   @Test func planCombinesMoveAndRenameIntoOneAtomicOperation() throws {
     let fixture = try makeFixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }

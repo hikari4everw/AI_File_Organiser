@@ -383,18 +383,23 @@ public struct ClassificationPipeline: Sendable {
   ) -> [FolderProposal] {
     let grouped = Dictionary(
       grouping: proposals.filter {
-        $0.action == .suggestFolder && $0.suggestedFolderName != nil
+        ($0.action == .suggestFolder || $0.action == .move)
+          && $0.suggestedFolderName != nil
       }
-    ) { PathSafety.normalizedFolderKey($0.suggestedFolderName ?? "") }
+    ) { proposal in
+      let parent = proposal.action == .move ? proposal.destinationID?.uuidString ?? "missing" : "root"
+      return parent + ":" + PathSafety.normalizedFolderKey(proposal.suggestedFolderName ?? "")
+    }
     return grouped.keys.sorted().compactMap { key in
       guard !key.isEmpty, let values = grouped[key], let first = values.first,
         let display = first.suggestedFolderName
       else { return nil }
       return FolderProposal(
         sessionID: sessionID,
-        normalizedName: key,
+        normalizedName: PathSafety.normalizedFolderKey(display),
         displayName: display,
-        relatedItemIDs: values.map(\.itemID)
+        relatedItemIDs: values.map(\.itemID),
+        parentDestinationID: first.action == .move ? first.destinationID : nil
       )
     }
   }
