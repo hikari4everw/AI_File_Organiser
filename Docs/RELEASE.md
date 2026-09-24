@@ -42,4 +42,4 @@ AIFO_BASIC_MODE=1 ./scripts/build-app.sh
 
 ## 正式发布
 
-获得付费 Apple Developer 账号后，将脚本中的 ad-hoc 签名替换为 Developer ID Application，随后执行公证和 stapling。V2.2 不集成 Sparkle，也不提交 Mac App Store。
+获得付费 Apple Developer 账号后，将脚本中的 ad-hoc 签名替换为 Developer ID Application，随后执行公证和 stapling。V2.3 不集成 Sparkle，也不提交 Mac App Store。

@@ -3,7 +3,7 @@ import Testing
 
 @testable import AIFileOrganizerCore
 
-/// 跨卷拒绝是产品对外的核心安全承诺之一（"V2.2 不跨卷移动"），
+/// 跨卷拒绝是产品对外的核心安全承诺之一（"V2.3 不跨卷移动"），
 /// 但此前没有任何测试构造过卷不匹配的场景：所有夹具都把收件箱与资料库
 /// 钉在同一个真实卷上，因此 `SafePlanExecutor.preflight` 的跨卷分支
 /// 从未被执行过。

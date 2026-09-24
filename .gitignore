@@ -3,6 +3,8 @@
 .DS_Store
 DerivedData/
 dist/
+# 按版本/提交命名的构建产物目录（如 dist-2.3.0/），与本机 dist/ 一样不提交
+/dist-*/
 *.xcuserstate
 xcuserdata/
 .xcode-derived/
